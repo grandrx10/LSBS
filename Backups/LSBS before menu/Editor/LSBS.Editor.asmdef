@@ -1,0 +1,8 @@
+{
+  "name": "LSBS.Editor",
+  "rootNamespace": "LSBS.EditorTools",
+  "references": ["LSBS", "Unity.Mathematics", "Unity.Collections", "Unity.ProBuilder", "Unity.RenderPipelines.Core.Runtime", "Unity.RenderPipelines.Universal.Runtime"],
+  "includePlatforms": ["Editor"],
+  "allowUnsafeCode": true,
+  "autoReferenced": true
+}

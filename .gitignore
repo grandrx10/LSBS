@@ -1,0 +1,33 @@
+# Unity rebuilds all of these
+/Library/
+/Temp/
+/Logs/
+/obj/
+/UserSettings/
+/MemoryCaptures/
+/Recordings/
+*.csproj
+*.sln
+*.user
+*.pidb
+*.suo
+.vs/
+
+# Builds
+/Builds/
+/Build/
+*_BurstDebugInformation_DoNotShip/
+*_BackUpThisFolder_ButDontShipItWithYourGame/
+
+# The old Gunbound build this folder was copied from
+/Gunbound.exe
+/Gunbound_Data/
+/D3D12/
+/MonoBleedingEdge/
+/UnityPlayer.dll
+/UnityCrashHandler64.exe
+
+# Private to this machine
+.claude/settings.local.json
+.DS_Store
+Thumbs.db
