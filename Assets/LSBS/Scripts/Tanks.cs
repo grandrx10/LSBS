@@ -580,8 +580,8 @@ namespace LSBS
             t.WantCannonPitch = math.clamp(-math.atan2(l.y, math.length(l.xz)), -0.5f, 0.2f);
         }
 
-        /// <summary>How far from its mark a shell may fall: less when that's nearly on top of the tank itself.</summary>
-        public float Scatter(Tank t, float3 mark) => math.min(T.tankScatter, math.distance(mark.xz, t.Pos.xz) * 0.5f);
+        /// <summary>How far from its mark a shell may fall: so many degrees off, seen from the tank, so nearer marks get closer shots.</summary>
+        public float Scatter(Tank t, float3 mark) => math.distance(mark.xz, t.Pos.xz) * math.tan(math.radians(math.clamp(T.tankScatter, 0f, 45f)));
 
         /// <summary>The way a shell goes to come down somewhere about where the gun's laid.</summary>
         float3 Scattered(Tank t, float3 dir)

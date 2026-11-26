@@ -23,7 +23,7 @@ namespace LSBS
     public struct Tuning
     {
         /// <summary>Bumped when the settings change shape: a scene saved before then takes the new ones.</summary>
-        public const int Latest = 10;
+        public const int Latest = 11;
         /// <summary>A scene saved with older settings: keep what it has, and fill in what's new.</summary>
         public static void Upgrade(ref Tuning t)
         {
@@ -32,6 +32,10 @@ namespace LSBS
             int had = t.version;
             if (had < 6) { t = d; return; }
             t.version = Latest;
+            // blasts do half the harm they did, and a tank's shell wanders by angle rather than by a set distance
+            t.grenadeFullDamage *= 0.5f; t.grenadeEdgeDamage *= 0.5f; t.shellFullDamage *= 0.5f; t.shellEdgeDamage *= 0.5f;
+            t.tankScatter = d.tankScatter;
+            if (had == 10) return;
             // everything less accurate, and all but shotguns shorter ranged, than whatever they were set to
             const float aim = 0.3f, range = 0.7f;
             t.pistolMaxRange = t.shotgunMaxRange * range; t.pistolCloseRange = t.shotgunCloseRange * range;
@@ -119,7 +123,7 @@ namespace LSBS
         [Tooltip("One tank comes up for every so many soldiers. 0 for none.")] public int soldiersPerTank;
         [Tooltip("The most a side may have at once.")] public int maxTanks;
         [Tooltip("How far off a tank's crew will fire its main gun.")] public float tankRange;
-        [Tooltip("How far from where it's aimed a tank's shell may come down.")] public float tankScatter;
+        [Tooltip("Degrees off where it's aimed a tank's shell may go, seen from the tank.")] public float tankScatter;
 
         [Header("Bunkers")]
         [Tooltip("The most soldiers who'll stay to hold one.")] public int bunkerCap;
@@ -140,13 +144,13 @@ namespace LSBS
             startPerSide = 500, capPerSide = 500, waveSize = 100, waveInterval = 30f, infantryWeight = 6f, sweeperWeight = 2f, communicatorWeight = 1f, gunnerWeight = 1f, pistolDamage = 80f, heightSpread = 0.08f,
             maxRange = 52.5f, maxRangeHit = 0.03f, closeRange = 17.5f, closeHit = 0.27f, damage = 100f,
             shotgunMaxRange = 40f, shotgunMaxRangeHit = 0.03f, shotgunCloseRange = 20f, shotgunCloseHit = 0.27f,
-            pistolMaxRange = 28f, pistolMaxRangeHit = 0.03f, pistolCloseRange = 14f, pistolCloseHit = 0.27f, tankRange = 100f, tankScatter = 20f, maximHit = 0.5f, tankGunRange = 0.75f, pelletDamage = 20f, pellets = 9,
+            pistolMaxRange = 28f, pistolMaxRangeHit = 0.03f, pistolCloseRange = 14f, pistolCloseHit = 0.27f, tankRange = 100f, tankScatter = 10f, maximHit = 0.5f, tankGunRange = 0.75f, pelletDamage = 20f, pellets = 9,
             headChance = 0.10f, limbChance = 0.20f, headMultiplier = 2f, limbMultiplier = 0.5f,
             battlefieldModifiers = true, coverHit = 0.35f, kneelHit = 0.8f, movingHit = 0.6f, aimMin = 0.8f, aimMax = 2.4f,
-            grenades = 2, grenadeFullRadius = 8f, grenadeFullDamage = 100f, grenadeEdgeRadius = 15f, grenadeEdgeDamage = 30f,
+            grenades = 2, grenadeFullRadius = 8f, grenadeFullDamage = 50f, grenadeEdgeRadius = 15f, grenadeEdgeDamage = 15f,
             grenadeMinThrow = 17f, grenadeMaxThrow = 34f, grenadeFuse = 2.4f,
             callRange = 200f, soldiersPerGun = 50, strikeSeconds = 20f, strikeRadius = 20f, strikeCooldown = 90f, gunRest = 240f,
-            shellFullRadius = 8.5f, shellFullDamage = 120f, shellEdgeRadius = 20f, shellEdgeDamage = 30f, lowBlast = 0.5f,
+            shellFullRadius = 8.5f, shellFullDamage = 60f, shellEdgeRadius = 20f, shellEdgeDamage = 15f, lowBlast = 0.5f,
             friendlyBlasts = true, dismember = 0.55f,
             runSpeed = 4.6f, cautiousSpeed = 3.2f,
             memory = 20f, attackEdge = 0.01f, defendEdge = 0.03f, maxDefend = 30f, pushShare = 0.75f, holdShare = 0.3f,
