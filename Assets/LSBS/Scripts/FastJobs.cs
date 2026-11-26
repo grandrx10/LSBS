@@ -8,31 +8,32 @@ using UnityEngine.Rendering;
 
 namespace LSBS
 {
-    /// <summary>Who's standing on which objective, and how many each side has left.</summary>
+    /// <summary>Who's standing on the objective, and how many each side has left.</summary>
     [BurstCompile]
     public struct PresenceJob : IJob
     {
         [ReadOnly] public NativeArray<SlotState> Slots;
         [ReadOnly] public NativeArray<float2> Objectives;
-        public NativeArray<int> Out; // objective * 2 + team, then the two sides' strengths
+        /// <summary>Team.Max on the objective, then Team.Max alive.</summary>
+        public NativeArray<int> Out;
         public int Count;
         public float Radius2;
 
         public void Execute()
         {
             for (int i = 0; i < Out.Length; i++) Out[i] = 0;
+            float2 centre = Objectives[Front.Centre];
             for (int i = 0; i < Count; i++)
             {
                 var s = Slots[i];
-                if (!s.Alive) continue;
-                Out[Front.Count * 2 + s.Team]++;
-                for (int o = 0; o < Front.Count; o++)
-                    if (math.distancesq(s.Pos.xz, Objectives[o]) < Radius2) { Out[o * 2 + s.Team]++; break; }
+                if (!s.Alive || s.Team >= Team.Max) continue;
+                Out[Team.Max + s.Team]++;
+                if (!s.Inside && math.distancesq(s.Pos.xz, centre) < Radius2) Out[s.Team]++;
             }
         }
     }
 
-    public struct TankRest { public float2 Pos; public float Yaw, Y, Pitch, Roll; }
+    public struct TankRest { public float2 Pos; public float Yaw, Y, Pitch, Roll, Gauge, Reach; }
 
     /// <summary>How tanks sit: each track across the high points under it.</summary>
     [BurstCompile]
@@ -45,7 +46,7 @@ namespace LSBS
         {
             var t = Tanks[index];
             const int n = 11;
-            const float reach = 3.3f, gauge = 1.98f;
+            float reach = t.Reach, gauge = t.Gauge;
             var s = new TankState { Pos = new float3(t.Pos.x, 0, t.Pos.y), Yaw = t.Yaw };
             float* h = stackalloc float[n];
             float hl = 0, hr = 0, sl = 0, sr = 0;
@@ -55,7 +56,7 @@ namespace LSBS
                 {
                     float z = math.lerp(-reach, reach, i / (n - 1f));
                     // the ends of the belt turn up
-                    h[i] = Map.Height(s.World(new float2(side == 0 ? -gauge : gauge, z))) - math.max(0f, math.abs(z) - 2.4f) * 0.55f;
+                    h[i] = Map.Height(s.World(new float2(side == 0 ? -gauge : gauge, z))) - math.max(0f, math.abs(z) - (reach - 0.9f)) * 0.55f;
                 }
                 // the edge of what's under it that crosses beneath its middle
                 float best = -1e9f, slope = 0f;
@@ -83,14 +84,14 @@ namespace LSBS
     {
         public NativeArray<GunSearch> Guns;
         [ReadOnly] public NativeArray<SlotState> Slots;
-        [ReadOnly] public Grid Green, Grey;
+        [ReadOnly] public Grid All;
         [ReadOnly] public MapView Map;
         public float Range, Arc;
 
         public void Execute(int index)
         {
             var g = Guns[index];
-            var theirs = g.Team == Team.Green ? Grey : Green;
+            var theirs = All;
             // the nearest few first, and only then whether they're in sight
             var bestD = new FixedList64Bytes<float>();
             var bestI = new FixedList64Bytes<int>();

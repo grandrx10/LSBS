@@ -55,10 +55,6 @@ namespace LSBS
         public int MaximsSet, MaximsLost;
         float _gunners, _crew;
 
-        public const int OrderAuto = 0, OrderAttack = 1, OrderDefend = 2;
-        public readonly int[] Orders = new int[2];
-        public readonly int[] WaveSize = { 100, 100 };
-
         void MaximCreate()
         {
             Maxims = new NativeList<Maxim>(512, Allocator.Persistent);
@@ -69,29 +65,6 @@ namespace LSBS
         {
             Maxims.Dispose();
             Deeds.Dispose();
-        }
-
-        // ------------------------------------------------------------------ orders from the panel
-
-        public void Order(int team, int order)
-        {
-            Orders[team] = order;
-            for (int i = 0; i < math.min(_squadHigh, MaxSoldiers); i++)
-            {
-                var q = Squads[i];
-                if (!q.Active || q.PlayerLed || q.Team != team) continue;
-                Assign(ref q, q.Objective);
-                q.ModeTimer = 0f;
-                Squads[i] = q;
-            }
-        }
-
-        /// <summary>Reinforcements now, whatever the clock and the cap say.</summary>
-        public void SpawnNow(byte team, int count)
-        {
-            CompleteDependency();
-            Spawn(team, count);
-            TanksFor(team, count);
         }
 
         // ------------------------------------------------------------------ setting up, taking down
@@ -273,7 +246,7 @@ namespace LSBS
                     {
                         int slot = _near.Items[n];
                         var s = Slots[slot];
-                        if (!s.Alive || s.Team != m.Team || s.Player || s.Mounted || s.Squad == PlayerSquad || s.Class == SoldierClass.Communicator) continue;
+                        if (!s.Alive || s.Team != m.Team || s.Player || s.Mounted || s.Squad == PlayerSquad || s.Class == SoldierClass.Communicator || Squads[s.Squad].Ordered) continue;
                         var q = Squads[s.Squad];
                         if (q.Captain == s.Member || q.Mode != SquadMode.Hold) continue;
                         float d = math.distancesq(s.Pos.xz, spot) * (s.Class == SoldierClass.Gunner ? 0.2f : 1f);
@@ -327,7 +300,7 @@ namespace LSBS
                 if (!settled || brain.Dive > 0f) continue;
                 // facing who they can see, else the way the squad does
                 float yaw = math.atan2(q.Facing.x, q.Facing.y);
-                if (brain.OnPost) yaw = s.Team == Team.Green ? math.PI * 0.5f : -math.PI * 0.5f;
+                if (brain.OnPost) yaw = math.atan2(q.Facing.x, q.Facing.y);
                 else if (brain.Target >= 0) { float2 f = Slots[brain.Target].Pos.xz - s.Pos.xz; yaw = math.atan2(f.x, f.y); }
                 if (!Site(s.Pos.xz, yaw, out var at, out bool tall))
                 {

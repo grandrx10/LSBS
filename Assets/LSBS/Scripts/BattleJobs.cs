@@ -28,8 +28,8 @@ namespace LSBS
         public void Dispose() { Start.Dispose(); Items.Dispose(); }
         public int2 At(float2 p) => math.clamp((int2)((p + new float2(MapView.HalfW, MapView.HalfH)) / Cell), 0, new int2(W - 1, H - 1));
 
-        /// <summary>How many are within r of a point.</summary>
-        public int CountNear(in NativeArray<SlotState> slots, float2 p, float r, int enough)
+        /// <summary>How many of one side (same) or of everyone else (!same) are within r of a point.</summary>
+        public int CountNear(in NativeArray<SlotState> slots, float2 p, float r, int enough, byte team, bool same)
         {
             int n = 0;
             int2 a = At(p - r), b = At(p + r);
@@ -38,7 +38,11 @@ namespace LSBS
             {
                 int k = y * W + x;
                 for (int i = Start[k]; i < Start[k + 1]; i++)
-                    if (math.distancesq(slots[Items[i]].Pos.xz, p) < r * r && ++n >= enough) return n;
+                {
+                    var s = slots[Items[i]];
+                    if ((s.Team == team) != same) continue;
+                    if (math.distancesq(s.Pos.xz, p) < r * r && ++n >= enough) return n;
+                }
             }
             return n;
         }
@@ -129,11 +133,13 @@ namespace LSBS
             q.PlayerLed = cap.Player;
             q.Pos = cap.Pos.xz;
             q.Vel = math.lerp(q.Vel, cap.Vel, math.min(1f, Dt * 3f));
-            float side = q.Team == Team.Green ? 1f : -1f;
+            float2 obj = Map.Objectives[q.Objective];
+            // looking out from the objective, or in at it
+            float2 outward = math.normalizesafe(q.Pos - obj, new float2(1, 0));
 
             if (q.PlayerLed)
             {
-                q.Facing = math.normalizesafe(math.lerp(q.Facing, new float2(math.sin(cap.Yaw), math.cos(cap.Yaw)), math.min(1f, Dt * 2f)), new float2(side, 0));
+                q.Facing = math.normalizesafe(math.lerp(q.Facing, new float2(math.sin(cap.Yaw), math.cos(cap.Yaw)), math.min(1f, Dt * 2f)), outward);
                 q.Mode = q.PlayerHold ? SquadMode.Hold : SquadMode.Advance;
                 q.Goal = q.Pos;
                 q.Attacking = true;
@@ -141,18 +147,26 @@ namespace LSBS
                 return;
             }
 
-            float2 obj = Map.Objectives[q.Objective];
-            bool isBase = q.Objective == 0 || q.Objective == Front.Count - 1;
-            // the more there are going for it, the wider they come at it
-            if (q.Attacking) q.Goal = obj + q.Spot * (CaptureRadius * 0.8f + q.Crowd * 1.1f);
-            // a line across the approach, a little ahead of what's being held
-            else q.Goal = obj + new float2(side * (6f + q.Spot.x * (9f + q.Crowd * 0.6f)), q.Spot.y * ((isBase ? 45f : 24f) + q.Crowd));
+            if (q.Ordered)
+            {
+                // where the commander said, by their own way, ready for whatever's there
+                q.Attacking = true;
+                // everyone sent to the same place: each squad a little to its own side of it, rather than all on one spot
+                q.Goal = q.OrderAt + q.Spot * 7f;
+            }
+            else
+            {
+                // the more there are going for it, the wider they come at it
+                if (q.Attacking) q.Goal = obj + q.Spot * (CaptureRadius * 0.8f + q.Crowd * 1.1f);
+                // holding it: a ring about it, a little out from the middle
+                else q.Goal = obj + math.normalizesafe(q.Spot, outward) * (CaptureRadius * (0.55f + 0.35f * math.length(q.Spot)) + q.Crowd * 0.5f);
+            }
             q.Goal = MapView.Clamp(q.Goal);
 
             // the squad faces the way it's headed (or the enemy's side), and only comes round slowly
             float2 toGoal = q.Goal - q.Pos;
             float dist = math.length(toGoal);
-            float2 want = dist > 12f ? toGoal / dist : new float2(side, 0);
+            float2 want = dist > 12f ? toGoal / dist : q.Ordered ? math.normalizesafe(q.Facing, outward) : q.Attacking ? -outward : outward;
             q.Facing = math.normalizesafe(math.lerp(q.Facing, want, math.min(1f, Dt * 0.7f)), want);
 
             q.ModeTimer -= Dt;
@@ -192,7 +206,8 @@ namespace LSBS
     public partial struct SenseJob : IJobEntity
     {
         [ReadOnly] public NativeArray<SlotState> Slots;
-        [ReadOnly] public Grid Green, Grey;
+        /// <summary>Everybody, of every side.</summary>
+        [ReadOnly] public Grid All;
         [ReadOnly] public MapView Map;
         public float Dt, Range;
 
@@ -213,7 +228,7 @@ namespace LSBS
             if (brain.SenseTimer > 0f) return;
             brain.SenseTimer = brain.Rng.NextFloat(0.25f, 0.45f);
 
-            var grid = s.Team == Team.Green ? Grey : Green;
+            var grid = All;
             const int K = 5;
             var bestD = new FixedList64Bytes<float>();
             var bestI = new FixedList64Bytes<int>();
@@ -238,6 +253,7 @@ namespace LSBS
                         for (int n = grid.Start[k]; n < end; n++)
                         {
                             int slot = grid.Items[n];
+                            if (Slots[slot].Team == s.Team) continue;
                             float d = math.distancesq(Slots[slot].Pos.xz, p);
                             if (d > Range * Range) continue;
                             if (brain.Mounted)
@@ -286,6 +302,8 @@ namespace LSBS
         [ReadOnly] public MapView Map;
         [ReadOnly] public NativeArray<TankState> Tanks;
         [NativeDisableParallelForRestriction] public NativeArray<Maxim> Maxims;
+        /// <summary>The way to wherever commanders have sent squads (BattleSystem.OrderFields of them).</summary>
+        [ReadOnly] public NativeArray<sbyte> OrderFlow;
         public float MaximBack;
         public Tuning T;
         public float Dt;
@@ -411,7 +429,7 @@ namespace LSBS
                 {
                     brain.Holding = true;
                     if (dive) brain.Walking = false;
-                    brain.HoldPos = ability.Act != Act.None || dive ? p : FindCover(p, s.Team, q.Attacking, ref brain.Rng, brain.HoldLeft > 0f ? 3 : 6);
+                    brain.HoldPos = ability.Act != Act.None || dive ? p : FindCover(p, brain.Target >= 0 ? Slots[brain.Target].Pos.xz - p : q.Facing, q.Attacking, ref brain.Rng, brain.HoldLeft > 0f ? 3 : 6);
                     if (told) brain.HoldLeft = math.max(brain.HoldLeft, 1.5f);
                 }
                 dest = brain.HoldPos;
@@ -430,6 +448,9 @@ namespace LSBS
             // holding a bunker: its slit, and nowhere else
             if (brain.OnPost && ability.Act == Act.None && ability.Want < 0) { dest = brain.Post; flow = false; hold = true; captain = false; }
 
+            // the group's shared way runs to the middle of where they're going: off it once their own place is the nearer
+            if (flow && q.Ordered && math.distance(p, q.OrderVia) < math.distance(q.OrderAt, q.OrderVia) + 12f) flow = false;
+
             float2 to = dest - p;
             float dist = math.length(to);
             float2 dir = math.normalizesafe(to);
@@ -447,15 +468,16 @@ namespace LSBS
             }
             if (flow)
             {
-                float2 f = Map.FlowDir(q.Objective, p);
+                bool own = q.Ordered && q.Field >= 0;
+                float2 f = own ? MapView.FlowDir(OrderFlow, q.Field, p) : Map.FlowDir(q.Objective, p);
                 if (math.lengthsq(f) > 0.1f)
                 {
                     // squads keep abreast of each other rather than filing down one path
-                    float lane = math.clamp((Map.Objectives[q.Objective].y + q.Spot.y * 42f - p.y) * 0.03f, -0.55f, 0.55f) * math.saturate((dist - 34f) / 40f);
+                    float lane = q.Ordered ? 0f : math.clamp((Map.Objectives[q.Objective].y + q.Spot.y * 42f - p.y) * 0.03f, -0.55f, 0.55f) * math.saturate((dist - 34f) / 40f);
                     dir = math.normalizesafe(f + new float2(0, lane));
                     if (brain.Stuck > 0.15f || Map.IsBlocked(p + dir * 1.1f))
                     {
-                        float2 sure = Map.FlowHere(q.Objective, p);
+                        float2 sure = own ? MapView.FlowHere(OrderFlow, q.Field, p) : Map.FlowHere(q.Objective, p);
                         if (math.any(sure)) dir = sure;
                     }
                 }
@@ -503,12 +525,14 @@ namespace LSBS
             for (int i = 0; i < Tanks.Length; i++)
             {
                 var k = Tanks[i];
-                if (math.distancesq(k.Pos.xz, p) > 64f) continue;
+                if (k.Flying) continue;
+                float wide = k.HalfWide + 0.6f, along = k.HalfLong + 0.8f;
+                if (math.distancesq(k.Pos.xz, p) > (along + 4f) * (along + 4f)) continue;
                 float2 l = k.Local(p);
                 // further out ahead of one that's moving
-                float ahead = 4.7f + math.max(0f, k.Speed) * 0.8f;
-                if (math.abs(l.x) > 3.6f || l.y > ahead || l.y < -4.7f) continue;
-                float2 outward = math.abs(l.x) / 3.6f > math.abs(l.y) / 4.7f || l.y > 3f ? new float2(l.x >= 0f ? 1f : -1f, 0f) : new float2(0f, l.y >= 0f ? 1f : -1f);
+                float ahead = along + math.max(0f, k.Speed) * 0.8f;
+                if (math.abs(l.x) > wide || l.y > ahead || l.y < -along) continue;
+                float2 outward = math.abs(l.x) / wide > math.abs(l.y) / along || l.y > along - 1.7f ? new float2(l.x >= 0f ? 1f : -1f, 0f) : new float2(0f, l.y >= 0f ? 1f : -1f);
                 want += (k.World(outward) - k.Pos.xz) * 4.2f;
             }
 
@@ -579,10 +603,10 @@ namespace LSBS
         }
 
         /// <summary>The nearest spot sheltered from the enemy's side, within a few metres; where they stand if there's none.</summary>
-        float2 FindCover(float2 p, byte team, bool attacking, ref Random rng, int radius)
+        float2 FindCover(float2 p, float2 threat, bool attacking, ref Random rng, int radius)
         {
-            byte bit = team == Team.Green ? MapView.FromPlusX : MapView.FromMinusX;
-            float ahead = team == Team.Green ? 1f : -1f;
+            byte bit = MapView.CoverFrom(threat);
+            float2 ahead = math.normalizesafe(threat, new float2(1, 0));
             int2 c0 = MapView.Cell(p);
             float best = 1e9f;
             float2 at = p;
@@ -590,7 +614,7 @@ namespace LSBS
             for (int x = -radius; x <= radius; x++)
             {
                 // not back the way they've come, while attacking
-                if (attacking && x * ahead < -2f) continue;
+                if (attacking && math.dot(new float2(x, y), ahead) < -2f) continue;
                 int2 c = c0 + new int2(x, y);
                 if (c.x < 1 || c.y < 1 || c.x >= MapView.W - 1 || c.y >= MapView.H - 1) continue;
                 int i = MapView.Index(c);
@@ -610,7 +634,7 @@ namespace LSBS
     public partial struct AbilityJob : IJobEntity
     {
         [ReadOnly] public NativeArray<SlotState> Slots;
-        [ReadOnly] public Grid Green, Grey;
+        [ReadOnly] public Grid All;
         [ReadOnly] public MapView Map;
         [ReadOnly] public NativeArray<byte> Calling; // slots with a strike under way
         [ReadOnly] public NativeArray<Strike> Strikes;
@@ -620,6 +644,7 @@ namespace LSBS
         public NativeQueue<Throw>.ParallelWriter Throws;
         public NativeQueue<Throw>.ParallelWriter Calls;
         public NativeQueue<Deed>.ParallelWriter Deeds;
+        public NativeQueue<Launch>.ParallelWriter Launches;
 
         void Execute(in Soldier s, in Body b, ref Brain brain, ref Ability a, ref Gun gun)
         {
@@ -628,12 +653,20 @@ namespace LSBS
             if (a.Act != Act.None)
             {
                 a.Timer += Dt;
-                float at = a.Act == Act.Throw ? Ability.ReleaseAt : a.Act == Act.Call ? Ability.CallTime * 0.8f : Ability.Length(a.Act);
+                float at = a.Act == Act.Throw ? Ability.ReleaseAt : a.Act == Act.Call ? Ability.CallTime * 0.8f : a.Act == Act.Launch ? Ability.LaunchAt : Ability.Length(a.Act);
                 if (!a.Done && a.Timer >= at)
                 {
                     a.Done = true;
                     var e = new Throw { From = b.Pos + new float3(0, 1.9f * s.Height, 0), At = a.At, Team = s.Team, Shooter = s.Slot, ShooterGen = s.Gen };
                     if (a.Act == Act.Throw) { a.Grenades--; Throws.Enqueue(e); }
+                    else if (a.Act == Act.Launch)
+                    {
+                        a.Missiles--;
+                        float3 back = new float3(math.sin(b.Yaw), 0, math.cos(b.Yaw));
+                        float3 from = b.Pos + new float3(0, 1.75f * s.Height, 0) + back * 0.5f;
+                        Launches.Enqueue(new Launch { From = from, Tank = a.Target, Dir = a.Target < 0 ? math.normalizesafe(a.At - from) : float3.zero, Aimed = s.Player, Team = s.Team, Shooter = s.Slot, ShooterGen = s.Gen });
+                        a.Cooldown = T.missileCooldown;
+                    }
                     else if (a.Act == Act.Call) Calls.Enqueue(e);
                     else Deeds.Enqueue(new Deed { Slot = s.Slot, Gen = s.Gen, Act = a.Act, At = a.At, Yaw = a.Yaw, Tall = a.Tall });
                 }
@@ -646,9 +679,31 @@ namespace LSBS
                 return;
             }
             if (s.Player || a.Cooldown > 0f || a.Maxim >= 0) return;
-            var mine = s.Team == Team.Green ? Green : Grey;
-            var theirs = s.Team == Team.Green ? Grey : Green;
+            var all = All;
 
+            if (s.Class == SoldierClass.Launcher)
+            {
+                if (a.Missiles <= 0 || gun.Phase == GunPhase.Firing || math.lengthsq(b.Vel) > 4f) { a.Cooldown = 0.3f; return; }
+                a.Cooldown = brain.Rng.NextFloat(0.4f, 0.8f);
+                // the nearest enemy vehicle in range that can be seen
+                int best = -1;
+                float bestD = T.missileRange;
+                float3 eye = b.Pos + new float3(0, 1.75f * s.Height, 0);
+                for (int i = 0; i < Tanks.Length; i++)
+                {
+                    var k = Tanks[i];
+                    if (k.Wreck || k.Team == s.Team) continue;
+                    float away = math.distance(k.Pos, b.Pos);
+                    if (away > bestD || away < 12f) continue;
+                    if (!Map.Sees(eye, k.Pos + new float3(0, 2.2f, 0))) continue;
+                    bestD = away; best = i;
+                }
+                if (best < 0) return;
+                Begin(ref a, Act.Launch, Tanks[best].Pos);
+                a.Target = best;
+                a.Cooldown = T.missileCooldown;
+                return;
+            }
             if (s.Class == SoldierClass.Sweeper)
             {
                 if (a.Grenades <= 0 || gun.Phase == GunPhase.Firing) return;
@@ -656,11 +711,11 @@ namespace LSBS
                 for (int i = 0; i < Tanks.Length; i++)
                 {
                     var k = Tanks[i];
-                    if (k.Wreck || k.Team == s.Team) continue;
+                    if (k.Wreck || k.Flying || k.Team == s.Team) continue;
                     float away = math.distance(k.Pos, b.Pos);
                     if (away > T.grenadeMaxThrow - 4f || away < 6f) continue;
                     if (!Map.Sees(b.Pos + new float3(0, 1.8f, 0), k.Pos + new float3(0, 2f, 0))) continue;
-                    if (T.friendlyBlasts && mine.CountNear(Slots, k.Pos.xz, 6f, 1) > 0) continue;
+                    if (T.friendlyBlasts && all.CountNear(Slots, k.Pos.xz, 6f, 1, s.Team, true) > 0) continue;
                     float2 on = k.Pos.xz + new float2(math.sin(k.Yaw), math.cos(k.Yaw)) * k.Speed * 1.4f;
                     Begin(ref a, Act.Throw, new float3(on.x, k.Pos.y + 0.4f, on.y));
                     a.Cooldown = brain.Rng.NextFloat(1.4f, 2.2f);
@@ -673,67 +728,10 @@ namespace LSBS
                 if (!t.Alive || t.Gen != brain.TargetGen || d < T.grenadeMinThrow || d > T.grenadeMaxThrow) return;
                 // worth it for a few together, or somebody dug in
                 bool dugIn = !Map.Sees(b.Pos + new float3(0, 1.72f, 0), t.Pos + new float3(0, t.Kneel ? 0.85f : 1.3f, 0));
-                if (theirs.CountNear(Slots, t.Pos.xz, 8f, 2) < (dugIn ? 1 : 2)) return;
-                if (T.friendlyBlasts && mine.CountNear(Slots, t.Pos.xz, T.grenadeEdgeRadius * 0.75f, 1) > 0) return;
+                if (all.CountNear(Slots, t.Pos.xz, 8f, 2, s.Team, false) < (dugIn ? 1 : 2)) return;
+                if (T.friendlyBlasts && all.CountNear(Slots, t.Pos.xz, T.grenadeEdgeRadius * 0.75f, 1, s.Team, true) > 0) return;
                 Begin(ref a, Act.Throw, t.Pos);
                 a.Cooldown = brain.Rng.NextFloat(5f, 9f);
-            }
-            else if (s.Class == SoldierClass.Communicator)
-            {
-                if (Calling[s.Slot] != 0 || math.lengthsq(b.Vel) > 1f) { a.Cooldown = 1f; return; }
-                a.Cooldown = brain.Rng.NextFloat(2f, 4f);
-                // the biggest crowd about, the nearer the better
-                int2 lo = theirs.At(b.Pos.xz - T.callRange), hi = theirs.At(b.Pos.xz + T.callRange);
-                const int K = 8;
-                var score = new FixedList64Bytes<float>();
-                var cell = new FixedList64Bytes<int>();
-                for (int y = lo.y; y <= hi.y; y++)
-                for (int x = lo.x; x <= hi.x; x++)
-                {
-                    int k = y * theirs.W + x;
-                    if (theirs.Start[k + 1] == theirs.Start[k]) continue;
-                    float2 at = (new float2(x, y) + 0.5f) * theirs.Cell - new float2(MapView.HalfW, MapView.HalfH);
-                    float d = math.distance(at, b.Pos.xz);
-                    if (d > T.callRange) continue;
-                    int crowd = 0;
-                    for (int v = math.max(0, y - 2); v <= math.min(theirs.H - 1, y + 2); v++)
-                        crowd += theirs.Start[v * theirs.W + math.min(theirs.W - 1, x + 2) + 1] - theirs.Start[v * theirs.W + math.max(0, x - 2)];
-                    if (crowd < 6) continue;
-                    // somewhere being shelled already is worth less
-                    for (int n = 0; n < Strikes.Length; n++)
-                        if (!Strikes[n].Done && math.distancesq(Strikes[n].At.xz, at) < T.strikeRadius * T.strikeRadius * 1.6f) { crowd /= 4; break; }
-                    float worth = crowd * (1f - 0.45f * d / T.callRange);
-                    int into = score.Length;
-                    while (into > 0 && score[into - 1] < worth) into--;
-                    if (into >= K) continue;
-                    if (score.Length == K) { score.RemoveAt(K - 1); cell.RemoveAt(K - 1); }
-                    score.InsertRange(into, 1); score[into] = worth;
-                    cell.InsertRange(into, 1); cell[into] = k;
-                }
-                float3 where = 0;
-                bool found = false;
-                for (int i = 0; i < cell.Length && !found; i++)
-                {
-                    // the first of them they can see somebody in, with none of their own too near
-                    int k = cell[i];
-                    int n0 = theirs.Start[k], n1 = theirs.Start[k + 1];
-                    float3 mid = 0;
-                    bool seen = false;
-                    for (int n = n0; n < n1; n++)
-                    {
-                        var t = Slots[theirs.Items[n]];
-                        mid += t.Pos;
-                        if (!seen && n - n0 < 6) seen = Map.Sees(b.Pos + new float3(0, SenseJob.EyeStand * s.Height, 0), t.Pos + new float3(0, 1.7f, 0));
-                    }
-                    if (!seen) continue;
-                    mid /= n1 - n0;
-                    if (mine.CountNear(Slots, mid.xz, T.strikeRadius + T.shellEdgeRadius * 0.8f, 1) > 0) continue;
-                    where = mid;
-                    found = true;
-                }
-                if (!found) return;
-                Begin(ref a, Act.Call, where);
-                a.Cooldown = T.strikeCooldown;
             }
         }
 
@@ -834,22 +832,25 @@ namespace LSBS
                     case GunPhase.Firing:
                         if (gun.Timer > 0f) break;
                         if (gun.Ammo <= 0) { gun.Phase = GunPhase.Reloading; gun.Timer = Gun.ReloadTime(s.Class); }
-                        else { gun.Phase = GunPhase.Ready; gun.Timer = Aim(ref brain); }
+                        // an automatic stays on whoever it's on without stopping to aim again
+                        else { gun.Phase = GunPhase.Ready; gun.Timer = Gun.Automatic(s.Class) && brain.Target >= 0 && brain.Target == gun.AimedAt ? gun.Timer : Aim(ref brain); }
                         break;
                     case GunPhase.Reloading:
                         if (gun.Timer > 0f || busy) break;
                         gun.Ammo = Gun.Magazine(s.Class);
                         gun.Phase = GunPhase.Ready;
-                        gun.Timer = Aim(ref brain);
+                        gun.Timer = Aim(ref brain) * (Gun.Automatic(s.Class) && brain.Target >= 0 && brain.Target == gun.AimedAt ? 0.3f : 1f);
                         break;
                     default:
                         if (!aiming) { gun.Timer = math.max(gun.Timer, 0.45f); break; }
                         if (gun.Timer > 0f) break;
                         if (!Shoot(s, b, ref brain, s.Class == SoldierClass.Sweeper ? ShotKind.Shotgun : s.Class == SoldierClass.Gunner ? ShotKind.Pistol : ShotKind.Rifle,
-                            b.Pos + new float3(0, (brain.Kneel ? 1.30f : 1.72f) * s.Height, 0), s.Class == SoldierClass.Gunner ? 0.95f : 1.25f)) { gun.Timer = 0.3f; break; }
+                            b.Pos + new float3(0, (brain.Kneel ? 1.30f : 1.72f) * s.Height, 0), s.Class == SoldierClass.Gunner ? 0.95f : 1.25f)) { gun.Timer = 0.3f; gun.AimedAt = -1; break; }
                         gun.Ammo--;
+                        gun.AimedAt = brain.Target;
                         gun.Phase = GunPhase.Firing;
-                        gun.Timer = Gun.FireTime(s.Class);
+                        // carry the remainder over, so a frame longer than a round apart doesn't slow the rate
+                        gun.Timer = Gun.FireTime(s.Class) + math.min(0f, gun.Timer);
                         break;
                 }
             }

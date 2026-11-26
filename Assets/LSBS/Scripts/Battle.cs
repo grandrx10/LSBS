@@ -34,8 +34,11 @@ namespace LSBS
         World _world;
         RenderPipelineAsset _wasPipeline;
         Material _props;
-        readonly MeshFilter[] _flags = new MeshFilter[Front.Count];
-        readonly Mesh[] _cloth = new Mesh[3];
+        /// <summary>The game being set up, carried across the field being made anew for it.</summary>
+        public static GameSetup Pending;
+        public GameSetup Setup { get; private set; }
+        MeshRenderer _beacon;
+        Material _beaconMat;
         public float Shake => _fx != null ? _fx.Shake : 0f;
         GameMenu _menu;
         VolumeProfile _look;
@@ -69,11 +72,20 @@ namespace LSBS
             Bench.Parse(this);
             Look();
 
+            // the blockouts the machines were made from stay in the scene to look at, out of the way while playing
+            foreach (var name in new[] { "Tank", "TankDestroyer", "Transport", "VehicleTransport", "MissileLauncher", "Nothing" })
+            {
+                var blockout = GameObject.Find(name);
+                if (blockout != null && blockout.transform.parent == null) blockout.SetActive(false);
+            }
             var root = new GameObject("Field").transform;
             var ground = new Material(worldShader); ground.SetFloat("_Mud", 0.1f);
             var props = new Material(worldShader); props.SetFloat("_Mud", 0.35f);
             _props = props;
-            _map = new MapGenerator(root, ground, props, seed);
+            // the field's made for so many sides: a new game with a different number makes a new field
+            Setup = Pending;
+            int teams = Setup != null ? Setup.Teams : Bench.Asked ? 2 : 4;
+            _map = new MapGenerator(root, ground, props, seed, teams);
             _map.Generate();
 
             _world = World.DefaultGameObjectInjectionWorld ?? new World("LSBS");
@@ -81,13 +93,12 @@ namespace LSBS
             Sim.T = tuning;
             Sim.Map = _map.Map;
             
-            Sim.Bunkers = _map.BunkerList.ToArray();
             Sim.TankBlocked = _map.TankBlocked;
             Sim.TankFlow = _map.TankFlow;
             Sim.MaximBack = soldiers.maximBack;
             Sim.MaximMuzzle = soldiers.maximMuzzle;
             Stands();
-            Flags(root);
+            Beacon(root);
             _renderer = new SoldierRenderer(soldiers, new Material(soldierShader), tuning.maxCorpses);
             _bodies = new BodyStore(soldiers, _renderer, tuning.maxCorpses, tuning.maxRagdolls, root, p => Sim.Map.Height(new float2(p.x, p.z)));
             _fx = new Fx(new Material(fxShader), _map.Chimneys);
@@ -95,48 +106,43 @@ namespace LSBS
             _sfx = new Sfx(_cam.transform);
             Player = new PlayerControl(this, _cam);
             _menu = new GameMenu(this, _cam, _pipe, _look);
-            if (Bench.Asked) { AudioListener.volume = 0f; LayGuns(tuning.startPerSide, tuning.startPerSide); Sim.StartBattle(tuning.startPerSide, tuning.startPerSide); }
-            else if (Bench.BeginGreen > 0) { int g = Bench.BeginGreen, y = Bench.BeginGrey; Bench.BeginGreen = 0; Begin(g, y); }
+            if (Bench.Asked) { AudioListener.volume = 0f; StartNow(GameSetup.Even(2, tuning.startPerSide / Squad.Size, tuning)); }
+            else if (Setup != null) { Pending = null; StartNow(Setup); }
             else _menu.Show(GameMenu.Page.Main);
         }
 
         // ------------------------------------------------------------------ what the menu asks for
 
-        public void Begin(int green, int grey)
+        /// <summary>A new game: on a field made for it, so a fresh one is made first.</summary>
+        public void Begin(GameSetup setup)
+        {
+            Pending = setup;
+            Bench.NextSeed = setup.Seed != 0 ? setup.Seed : (uint)UnityEngine.Random.Range(1, int.MaxValue);
+            Reload();
+        }
+
+        /// <summary>Starts the game set up, on the field as it is.</summary>
+        public void StartNow(GameSetup setup)
         {
             if (Player.InSoldier) Player.Leave(false);
             _bodies.Clear();
-            tuning.startPerSide = green;
+            Setup = setup;
             Sim.T = tuning;
-            LayGuns(green, grey);
-            Sim.StartBattle(green, grey);
-            Player.Place(new Vector3(-70f, 26f, -60f), 55f, 18f);
+            Player.Rts.Team = setup.Player;
+            Sim.StartBattle(setup.Teams, setup.Player, setup.First, setup.Wave);
+            CommandHome();
             _over = 0f;
         }
 
-        Transform _battery;
-        Mesh _howitzer;
-
-        /// <summary>Puts out the artillery two armies of these sizes have.</summary>
-        void LayGuns(int green, int grey)
+        /// <summary>The commander's view goes back over their own side's landing ground, looking in at the objective.</summary>
+        void CommandHome()
         {
-            if (_battery != null) Destroy(_battery.gameObject);
-            _battery = new GameObject("Artillery").transform;
-            if (_howitzer == null) _howitzer = MapGenerator.HowitzerMesh();
-            Sim.Caps[0] = green; Sim.Caps[1] = grey;
-            for (int t = 0; t < 2; t++)
-            {
-                var places = _map.GunPlaces(t, Sim.GunsFor(t));
-                Sim.Guns[t] = places.ToArray();
-                foreach (var p in places)
-                {
-                    var go = new GameObject("Howitzer");
-                    go.transform.SetParent(_battery, false);
-                    go.transform.SetPositionAndRotation(p, Quaternion.Euler(0, t == 0 ? 90f : -90f, 0));
-                    go.AddComponent<MeshFilter>().sharedMesh = _howitzer;
-                    go.AddComponent<MeshRenderer>().sharedMaterial = _props;
-                }
-            }
+            var home = Sim.Map.Objectives[Front.Home(Player.Rts.Team)];
+            float2 ahead = home * 0.72f;
+            float yaw = math.degrees(math.atan2(-home.x, -home.y));
+            Player.Rts.LookAt(new Vector3(ahead.x, Sim.Map.Height(ahead), ahead.y), yaw);
+            Player.Rts.Selected.Clear();
+            Player.Rts.Vehicles.Clear();
         }
 
         public void ToMenu()
@@ -149,6 +155,11 @@ namespace LSBS
         public void NewField()
         {
             Bench.NextSeed = (uint)UnityEngine.Random.Range(1, int.MaxValue);
+            Reload();
+        }
+
+        void Reload()
+        {
             Time.timeScale = 1f;
             AudioListener.pause = false;
 #if UNITY_EDITOR
@@ -227,52 +238,23 @@ namespace LSBS
             _renderer?.Dispose(); _bodies?.Dispose(); _fx?.Dispose(); _map?.Dispose();
         }
 
-        void Flags(Transform root)
+        /// <summary>The objective's beacon: a ring of light that takes the colour of whoever holds it.</summary>
+        void Beacon(Transform root)
         {
-            int[] colours = { 0x5d7a2c, 0xa3abb5, 0x4a3c2c };
-            for (int i = 0; i < 3; i++)
-            {
-                var mb = new MeshBuilder();
-                Vector3 a = new(0, 0, 0), b = new(0, -2.2f, 0), c = new(0.35f, -1.9f, 3.6f), d = new(0.2f, 0.1f, 3.4f);
-                var col = MeshBuilder.Col(colours[i]);
-                mb.Quad(a, d, c, b, col);
-                mb.Quad(b, c, d, a, col);
-                _cloth[i] = mb.Build("Flag");
-            }
-            for (int o = 0; o < Front.Count; o++)
-            {
-                var p = Sim.Map.Objectives[o];
-                bool home = o == Front.GreenBase || o == Front.GreyBase;
-                var go = new GameObject("Flag " + o);
-                go.transform.SetParent(root, false);
-                go.transform.position = new Vector3(p.x, Sim.Map.Height(p) + (home ? 10.8f : o == Front.Centre ? 8.8f : 7.8f), p.y);
-                go.transform.localScale = Vector3.one * (home ? 1.25f : 1f);
-                _flags[o] = go.AddComponent<MeshFilter>();
-                go.AddComponent<MeshRenderer>().sharedMaterial = _props;
-            }
+            var mb = new MeshBuilder();
+            mb.Tube(new Vector3(0, -0.35f, 0), new Vector3(0, 0.35f, 0), 1.6f, 1.6f, 24, MeshBuilder.Col(0xffffff, MeshBuilder.Glow), false);
+            mb.Tube(new Vector3(0, 0.6f, 0), new Vector3(0, 1.0f, 0), 0.5f, 0.2f, 12, MeshBuilder.Col(0xffffff, MeshBuilder.Glow));
+            var go = new GameObject("Beacon");
+            go.transform.SetParent(root, false);
+            go.transform.position = _map.Beacon;
+            go.AddComponent<MeshFilter>().sharedMesh = mb.Build("Beacon");
+            _beaconMat = new Material(_props);
+            _beacon = go.AddComponent<MeshRenderer>();
+            _beacon.sharedMaterial = _beaconMat;
         }
 
-        public void Restart(int green, int grey)
-        {
-            if (Player.InSoldier) Player.Leave(false);
-            _bodies.Clear();
-            Sim.T = tuning;
-            LayGuns(green, grey);
-            Sim.StartBattle(green, grey);
-            _over = 0f;
-        }
-
-        public void Restart(int perSide)
-        {
-            if (Player.InSoldier) Player.Leave(false);
-            _bodies.Clear();
-            tuning.startPerSide = perSide;
-            tuning.capPerSide = math.max(perSide, tuning.capPerSide == 0 ? perSide : perSide);
-            Sim.T = tuning;
-            LayGuns(perSide, perSide);
-            Sim.StartBattle(perSide, perSide);
-            _over = 0f;
-        }
+        /// <summary>Another game the same as the last, on a new field.</summary>
+        public void Again() => Begin(Setup ?? GameSetup.Even(2, 30, tuning));
 
         // ------------------------------------------------------------------ the frame
 
@@ -288,8 +270,6 @@ namespace LSBS
                 var turn = Quaternion.Euler(0, _orbit, 0);
                 Player.Place(turn * new Vector3(0, 34f, -95f), _orbit, 14f);
             }
-            if (kb != null && !MenuOpen && kb.tabKey.wasPressedThisFrame) PanelOpen = !PanelOpen;
-            if (Player.InSoldier || Player.IsDead) PanelOpen = false;
             Sim.T = tuning;
             using (Prof.Player.Auto()) Player.Before(dt);
             Sim.Update();
@@ -310,39 +290,40 @@ namespace LSBS
             {
                 var b = Sim.Blasts[i];
                 _sfx.Blast(b, eye);
-                if (b.Report) _fx.GunReport(b.At, b.Team == 0 ? 1f : -1f, eye);
+                if (b.Report) _fx.GunReport(b.At, 1f, eye);
                 else if (b.Cannon) _fx.CannonFire(b.At, b.Dir, eye);
                 else if (b.Wreck) _fx.Explosion(b, eye);
                 else if (!b.Whistle) { _fx.Explosion(b, eye); _bodies.Blast(b.At, b.Radius * 0.6f); LastBlast = b.At; LastBig |= b.Big; }
             }
             Shells(dt);
             using (Prof.DrawMaxims.Auto()) DrawMaxims();
-            using (Prof.DrawTanks.Auto()) { DrawTanks(dt); _batch.Draw(); }
+            using (Prof.DrawTanks.Auto()) { DrawTanks(dt); DrawAir(dt); Launchers(); _batch.Draw(); }
             for (int i = 0; i < Sim.Deaths.Length; i++)
             {
                 var d = Sim.Deaths[i];
                 _bodies.Die(d, eye, tuning);
                 if (!d.Player) continue;
-                string who = d.Killer >= 0 ? Names.Of(d.Killer, d.KillerGen, d.KillerTeam) : "";
-                _killedBy = d.Kind == ShotKind.Tank ? "Run down by a tank" : d.Kind == ShotKind.Blast ? (d.Big ? "Artillery" : "Grenade") + (who != "" ? "   " + who : "") : who + "   " + (d.Kind == ShotKind.Shotgun ? "Rachmaninoff" : d.Kind == ShotKind.Maxim ? "Maxim" : d.Kind == ShotKind.Pistol ? "Wolfgang" : "Sebastion");
+                _killedBy = d.Kind == ShotKind.Tank ? "Run down by a tank" : d.Kind == ShotKind.Blast ? (d.Big ? "Artillery" : "Grenade") : d.Kind == ShotKind.Shotgun ? "Shotgun" : d.Kind == ShotKind.Maxim ? "Machine gun" : d.Kind == ShotKind.Pistol ? "Pistol" : "LR-15";
             }
             for (int i = 0; i < Sim.Grenades.Length; i++)
             {
                 var g = Sim.Grenades[i];
                 Graphics.DrawMesh(soldiers.grenade, Matrix4x4.TRS(g.Pos, Quaternion.Euler(g.Spin * Time.time * 57f, g.Spin * 40f, 0), Vector3.one * 1.1f), _props, 0);
             }
-            for (int o = 0; o < Front.Count; o++)
+            if (_beacon != null)
             {
-                var cloth = _cloth[Sim.Owner[o] == 255 ? 2 : Sim.Owner[o]];
-                if (_flags[o].sharedMesh != cloth) _flags[o].sharedMesh = cloth;
-                _flags[o].transform.rotation = Quaternion.Euler(0, 24f + Mathf.Sin(Time.time * 1.3f + o) * 9f, Mathf.Sin(Time.time * 2.1f + o * 2f) * 4f);
+                byte owner = Sim.Owner.Length > 0 ? Sim.Owner[Front.Centre] : (byte)255;
+                var c = owner == 255 ? new Color(0.55f, 0.58f, 0.62f) : Team.Colour(owner);
+                if (Sim.Capturing.Length > 0 && Sim.Capturing[Front.Centre] != 255 && Mathf.Repeat(Time.time * 2f, 1f) < 0.5f) c = Color.Lerp(c, Team.Colour(Sim.Capturing[Front.Centre]), 0.7f);
+                _beaconMat.SetColor("_Tint", c);
+                _beacon.transform.rotation = Quaternion.Euler(0, Time.time * 40f, 0);
             }
             using (Prof.Bodies.Auto()) _bodies.Update(dt, eye);
 
             if (Sim.Winner != 255)
             {
                 _over += dt;
-                if (_over > 10f) Restart(Sim.Caps[0], Sim.Caps[1]);
+                if (_over > 12f) { ToMenu(); _menu.Show(GameMenu.Page.Main); }
             }
             Timing();
         }
@@ -350,20 +331,28 @@ namespace LSBS
         // ------------------------------------------------------------------ tanks
 
         readonly MeshBatch _batch = new();
-        readonly TankModel[] _tanks = new TankModel[2];
+        VehicleModels _models;
+        readonly Material[] _paint = new Material[Team.Max];
         Material _burnt;
         float _smokeClock;
 
+        void Models()
+        {
+            if (_models != null) return;
+            _models = new VehicleModels();
+            _props.enableInstancing = true;
+            _burnt = new Material(_props);
+            _burnt.SetColor("_Tint", new Color(0.3f, 0.27f, 0.25f));
+            for (int t = 0; t < Team.Max; t++)
+            {
+                _paint[t] = new Material(_props) { enableInstancing = true };
+                _paint[t].SetColor("_Tint", Team.Colour(t));
+            }
+        }
+
         void DrawTanks(float dt)
         {
-            if (_tanks[0] == null)
-            {
-                _tanks[0] = new TankModel(0);
-                _tanks[1] = new TankModel(1);
-                _props.enableInstancing = true;
-                _burnt = new Material(_props);
-                _burnt.SetColor("_Tint", new Color(0.3f, 0.27f, 0.25f));
-            }
+            Models();
             Vector3 eye = _cam.transform.position;
             _smokeClock += dt;
             bool puff = _smokeClock > 0.2f;
@@ -372,35 +361,57 @@ namespace LSBS
             {
                 float d = ((Vector3)t.Pos - eye).magnitude;
                 var rot = t.Rotation;
-                float shake = t.Wreck ? 0f : 0.012f * (0.4f + t.Rumble);
+                float shake = t.Wreck || t.Carried ? 0f : 0.012f * (0.4f + t.Rumble);
                 Vector3 p = (Vector3)t.Pos + Vector3.down * BattleSystem.Sunk(t) + new Vector3(0, Mathf.Sin(Time.time * 47f + t.Pos.x) * shake, 0);
-                if (puff && d < 150f && _renderer.Visible(p + Vector3.up * 3f, 6f))
+                if (puff && d < 150f && !t.Carried && _renderer.Visible(p + Vector3.up * 3f, 6f))
                 {
                     if (t.Wreck) { if (t.WreckTime < Tank.WreckStay) _fx.Funnel(p + rot * new Vector3(0, 2.6f, -0.6f), 1f, true); }
-                    else
-                    {
-                        _fx.Funnel(p + rot * TankModel.Exhausts[Time.frameCount & 1], t.Rumble, false);
-                        if (Mathf.Abs(t.Speed) > 0.6f && d < 50f) for (int s = -1; s <= 1; s += 2) _fx.TrackDust(p + rot * new Vector3(s * 2f, 0.2f, -3.4f * Mathf.Sign(t.Speed)), Mathf.Abs(t.Speed));
-                    }
+                    else if (Mathf.Abs(t.Speed) > 0.6f && d < 50f) for (int s = -1; s <= 1; s += 2) _fx.TrackDust(p + rot * new Vector3(s * 2.4f, 0.2f, -t.HalfLong * Mathf.Sign(t.Speed)), Mathf.Abs(t.Speed));
                 }
-                if (d > 420f || !_renderer.Visible(p, 7f)) continue;
-                var m = _tanks[t.Team];
+                if (d > 460f || !_renderer.Visible(p, 8f)) continue;
+                var m = t.Kind == TankKind.Tank ? _models.Tank : _models.Destroyer;
                 var mat = t.Wreck ? _burnt : _props;
                 Matrix4x4 body = Matrix4x4.TRS(p, rot, Vector3.one);
-                bool near = d < 55f;
-                _batch.Add(near ? m.Hull : m.HullFar, mat, body);
+                _batch.Add(m.Hull, mat, body);
+                if (!t.Wreck) _batch.Add(m.Paint, _paint[t.Team & 7], body);
                 for (int s = 0; s < 2; s++)
                 {
                     float run = s == 0 ? t.TrackL : t.TrackR;
-                    int phase = !near ? 0 : Mathf.FloorToInt(Mathf.Repeat(-run / 0.36f, 1f) * TankModel.Phases) % TankModel.Phases;
-                    _batch.Add(m.Track[phase], mat, body * Matrix4x4.Translate(new Vector3((s == 0 ? -1f : 1f) * (TankModel.TrackIn + TankModel.TrackOut) * 0.5f, 0, 0)));
-                    if (d > 120f) continue;
-                    // its machine guns: the Maxim, off its tripod
-                    var gun = t.GunRotation(s);
-                    _batch.Add(soldiers.maximGun, mat, Matrix4x4.TRS(p + rot * TankModel.SideGun(s) + gun * new Vector3(0, 0, 0.25f), gun, Vector3.one));
+                    int phase = d > 70f ? 0 : Mathf.FloorToInt(Mathf.Repeat(-run / 0.4f, 1f) * VehicleModels.Phases) % VehicleModels.Phases;
+                    _batch.Add(m.Track[phase], mat, body * Matrix4x4.Translate(new Vector3((s == 0 ? -1f : 1f) * m.TrackX, 0, 0)));
+                }
+                if (t.Kind == TankKind.Tank)
+                {
+                    var turret = Matrix4x4.TRS(p + rot * TankShape.TurretPivot, t.TurretRotation, Vector3.one);
+                    _batch.Add(m.Turret, mat, turret);
+                    if (!t.Wreck) _batch.Add(m.TurretPaint, _paint[t.Team & 7], turret);
+                    if (d < 140f) _batch.Add(m.MachineGun, mat, Matrix4x4.TRS(p + rot * TankShape.GunPort, t.GunRotation(0), Vector3.one));
                 }
                 var cannon = t.CannonRotation;
-                _batch.Add(m.Gun, mat, Matrix4x4.TRS(p + rot * TankModel.Cannon - cannon * Vector3.forward * (t.Recoil * t.Recoil * 0.55f), cannon, Vector3.one));
+                Vector3 trunnion = t.CannonBase + (p - (Vector3)t.Pos);
+                _batch.Add(m.Gun, mat, Matrix4x4.TRS(trunnion - cannon * Vector3.forward * (t.Recoil * t.Recoil * 0.7f), cannon, Vector3.one));
+            }
+        }
+
+        /// <summary>Transports: their bodies, their colours, their fans going round.</summary>
+        void DrawAir(float dt)
+        {
+            Models();
+            Vector3 eye = _cam.transform.position;
+            foreach (var a in Sim.Flights)
+            {
+                if (a.Delay > 0f) continue;
+                Vector3 p = a.Pos;
+                if ((p - eye).sqrMagnitude > 600f * 600f || !_renderer.Visible(p, 9f)) continue;
+                var m = a.Kind == AirKind.Troop ? _models.Troop : _models.Lifter;
+                var rot = a.Rotation;
+                var body = Matrix4x4.TRS(p, rot, Vector3.one);
+                _batch.Add(m.Body, a.Wreck ? _burnt : _props, body);
+                if (!a.Wreck) _batch.Add(m.Paint, _paint[a.Team & 7], body);
+                float spin = Time.time * 1400f * (a.Wreck ? 0.2f : 1f);
+                for (int i = 0; i < m.Fans.Length; i++)
+                    _batch.Add(m.Fan, _props, body * Matrix4x4.TRS(m.Fans[i], Quaternion.Euler(0, i % 2 == 0 ? spin : -spin, 0), Vector3.one));
+                if (a.Wreck && Time.frameCount % 3 == 0) _fx.Funnel(p, 1f, true);
             }
         }
 
@@ -408,8 +419,8 @@ namespace LSBS
         {
             Fill(new Rect(24, h - 74, 204, 18), new Color(0.07f, 0.06f, 0.05f, 0.72f));
             Fill(new Rect(26, h - 72, 200 * Mathf.Clamp01(t.Health / Tank.Health0), 14), t.Health > Tank.ShellHurt ? Parch : new Color(0.8f, 0.25f, 0.15f));
-            string[] seats = { "1  Driver + main gun", "2  Left gun", "3  Right gun" };
-            for (int i = 0; i < 3; i++) Text(new Rect(24, h - 152 + i * 24, 240, 22), seats[i], _small, t.Seat == i ? Amber : Parch);
+            string[] seats = { "1  Driver + main gun", "2  Machine gun" };
+            for (int i = 0; i < (t.GunCount > 0 ? 2 : 1); i++) Text(new Rect(24, h - 152 + i * 24, 240, 22), seats[i], _small, t.Seat == i ? Amber : Parch);
             Fill(new Rect(w - 240, h - 66, 200, 18), new Color(0.07f, 0.06f, 0.05f, 0.72f));
             if (t.Seat == 0)
             {
@@ -431,8 +442,8 @@ namespace LSBS
                 }
                 Fill(new Rect(cx - 1, h * 0.5f - 1, 3, 3), new Color(1, 1, 1, 0.5f));
                 Fill(new Rect(cx - 70, h - 60, 140, 3), new Color(0.2f, 0.17f, 0.13f, 0.8f));
-                Fill(new Rect(cx - 3 + t.CannonYaw / Tank.CannonArc * 70f, h - 64, 6, 11), Amber);
-                Text(new Rect(20, h - 34, 1000, 24), "W S drive   A D turn   Mouse aim (15 degrees either way)   LMB fire   1 2 3 change place   E get out", _small, Parch);
+                Fill(new Rect(cx - 3 + t.CannonYaw / t.Arc * 70f, h - 64, 6, 11), Amber);
+                Text(new Rect(20, h - 34, 1000, 24), "W S drive   A D turn   Mouse aim   LMB fire   " + (t.GunCount > 0 ? "1 2 change place   " : "") + "E get out", _small, Parch);
             }
             else
             {
@@ -440,8 +451,48 @@ namespace LSBS
                 Fill(new Rect(w - 238, h - 64, 196 * (g.Reloading > 0f ? 1f - g.Reloading / Maxim.Reload : g.Ammo / (float)Maxim.Clip), 14), g.Reloading > 0f ? Parch : Amber);
                 Text(new Rect(w - 240, h - 94, 200, 24), g.Reloading > 0f ? "reloading" : "Maxim  " + g.Ammo, _small, Parch);
                 Fill(new Rect(cx - 1, h * 0.5f - 1, 2, 2), Parch);
-                Text(new Rect(20, h - 34, 1000, 24), "Mouse swing   LMB fire   R reload   1 2 3 change place   E get out", _small, Parch);
+                Text(new Rect(20, h - 34, 1000, 24), "Mouse swing   LMB fire   R reload   1 2 change place   E get out", _small, Parch);
             }
+        }
+
+        Mesh _tube, _missile;
+
+        /// <summary>Launchers on shoulders, and missiles in the air.</summary>
+        void Launchers()
+        {
+            if (_tube == null)
+            {
+                // from the blockout: a tube 1.7 m long on the shoulder, a sight off its side, a grip and trigger under it
+                var mb = new MeshBuilder();
+                Color body = MeshBuilder.Col(0x30363d, MeshBuilder.Metal), dark = MeshBuilder.Col(0x15181b), glow = MeshBuilder.Col(0x7fe6ff, MeshBuilder.Glow);
+                mb.Tube(new Vector3(0, 0, -0.95f), new Vector3(0, 0, 0.7f), 0.15f, 0.15f, 12, body);
+                mb.Tube(new Vector3(0, 0, -1.05f), new Vector3(0, 0, -0.95f), 0.18f, 0.16f, 12, dark);
+                mb.Tube(new Vector3(0, 0, 0.66f), new Vector3(0, 0, 0.74f), 0.17f, 0.17f, 12, dark);
+                mb.Tube(new Vector3(0, 0, 0.5f), new Vector3(0, 0, 0.54f), 0.155f, 0.155f, 12, glow);
+                mb.Tube(new Vector3(0.2f, 0.04f, -0.3f), new Vector3(0.2f, 0.04f, 0.05f), 0.06f, 0.06f, 8, dark);
+                mb.Box(new Vector3(0.2f, 0.04f, 0.06f), new Vector3(0.08f, 0.08f, 0.02f), Quaternion.identity, glow);
+                mb.Box(new Vector3(0, -0.2f, -0.1f), new Vector3(0.05f, 0.18f, 0.08f), Quaternion.Euler(-12f, 0, 0), dark);
+                mb.Box(new Vector3(0, -0.12f, 0.25f), new Vector3(0.05f, 0.12f, 0.06f), Quaternion.identity, dark);
+                _tube = mb.Build("Launcher");
+                mb = new MeshBuilder();
+                mb.Tube(new Vector3(0, 0, -0.35f), new Vector3(0, 0, 0.25f), 0.07f, 0.07f, 8, MeshBuilder.Col(0xd8dde2, MeshBuilder.Metal));
+                mb.Tube(new Vector3(0, 0, 0.25f), new Vector3(0, 0, 0.42f), 0.07f, 0.01f, 8, MeshBuilder.Col(0x30363d, MeshBuilder.Metal));
+                for (int f = 0; f < 4; f++) mb.Box(Quaternion.Euler(0, 0, f * 90f) * new Vector3(0, 0.09f, -0.3f), new Vector3(0.01f, 0.08f, 0.12f), Quaternion.Euler(0, 0, f * 90f), MeshBuilder.Col(0x30363d));
+                mb.Tube(new Vector3(0, 0, -0.4f), new Vector3(0, 0, -0.35f), 0.05f, 0.05f, 8, MeshBuilder.Col(0xff8a3a, MeshBuilder.Glow));
+                _missile = mb.Build("Missile");
+            }
+            Vector3 eye = _cam.transform.position;
+            for (int i = 0; i < Sim.HighSlot; i++)
+            {
+                var s = Sim.Slots[i];
+                if (!s.Alive || s.Inside || s.Class != SoldierClass.Launcher) continue;
+                if (((Vector3)s.Pos - eye).sqrMagnitude > 160f * 160f) continue;
+                var rot = Quaternion.Euler(-6f, s.Yaw * Mathf.Rad2Deg, 0);
+                float up = (s.Kneel ? 1.05f : 1.47f) * s.Height;
+                _batch.Add(_tube, _props, Matrix4x4.TRS((Vector3)s.Pos + rot * new Vector3(0.24f, 0.12f, 0.05f) + Vector3.up * up, rot, Vector3.one));
+            }
+            foreach (var m in Sim.Missiles)
+                _batch.Add(_missile, _props, Matrix4x4.TRS(m.Pos, Quaternion.LookRotation(math.normalizesafe(m.Vel, new float3(0, 0, 1))), Vector3.one));
         }
 
         readonly Mesh[] _stand = new Mesh[2];
@@ -490,21 +541,8 @@ namespace LSBS
         unsafe void Shells(float dt)
         {
             if (dt <= 0f || !_fx.TracerTick(dt)) return;
-            for (int i = 0; i < Sim.Strikes.Length; i++)
-            {
-                var s = Sim.Strikes[i];
-                var guns = Sim.Guns[s.Team];
-                if (s.Done || guns.Length == 0) continue;
-                for (int k = 0; k < Strike.Shells; k++)
-                {
-                    float u = 1f - (s.When[k] - s.Age) / Strike.Flight;
-                    if (u <= 0f || u >= 1f) continue;
-                    var p = MapView.Clamp(s.At.xz + new float2(s.X[k], s.Z[k]));
-                    float3 from = guns[s.Gun[k] % guns.Length] + new float3(s.Team == 0 ? 2.4f : -2.4f, 2.5f, 0);
-                    _fx.ShellTracer(from, new float3(p.x, Sim.Map.Height(p), p.y), u);
-                }
-            }
             foreach (var s in Sim.Shells) _fx.ShellPoint(s.Pos, s.Vel);
+            foreach (var m in Sim.Missiles) if (m.Age < Missile.Burn) _fx.MissileTrail(m.Pos, m.Vel);
         }
 
         void LateUpdate()
@@ -542,8 +580,8 @@ namespace LSBS
 
         GUIStyle _small, _mid, _big;
         Texture2D _white;
-        static readonly Color Parch = new(0.87f, 0.80f, 0.66f), Green = new(0.55f, 0.72f, 0.36f), Grey = new(0.70f, 0.75f, 0.81f), Amber = new(1f, 0.68f, 0.25f);
-        static Color Side(int t) => t == 0 ? Green : t == 1 ? Grey : new Color(0.45f, 0.42f, 0.38f);
+        static readonly Color Parch = new(0.86f, 0.88f, 0.9f), Green = new(0.45f, 0.9f, 0.55f), Amber = new(0.5f, 0.9f, 1f);
+        static Color Side(int t) => Team.Colour(t);
 
         void Fill(Rect r, Color c) { GUI.color = c; GUI.DrawTexture(r, _white); GUI.color = Color.white; }
         void Text(Rect r, string s, GUIStyle st, Color c)
@@ -567,30 +605,35 @@ namespace LSBS
             }
             float w = Screen.width, h = Screen.height, cx = w * 0.5f;
 
-            // ---- the front: both strengths and the three objectives ----
-            Fill(new Rect(cx - 270, 10, 540, 92), new Color(0.07f, 0.06f, 0.05f, 0.72f));
-            Fill(new Rect(cx - 270, 100, 540, 2), new Color(0.6f, 0.44f, 0.2f));
-            for (int t = 0; t < 2; t++)
+            // ---- every side: how many it has, and how long it's held the objective ----
+            int n = Sim.TeamCount;
+            float rowH = 22f, boxW = 420f, top = 10f;
+            Fill(new Rect(cx - boxW * 0.5f, top, boxW, 40 + n * rowH), new Color(0.04f, 0.05f, 0.06f, 0.75f));
+            byte owner = Sim.Owner.Length > 0 ? Sim.Owner[Front.Centre] : (byte)255;
+            string state = owner == 255 ? "OBJECTIVE  unheld" : $"OBJECTIVE  held by {Team.Names[owner]}";
+            if (Sim.Capturing.Length > 0 && Sim.Capturing[Front.Centre] != 255) state += $"   {Team.Names[Sim.Capturing[Front.Centre]]} taking it {Sim.Capture[Front.Centre] * 100f:0}%";
+            Text(new Rect(cx - boxW * 0.5f + 12, top + 4, boxW - 24, 22), state, _small, owner == 255 ? Parch : Side(owner));
+            float wave = Mathf.Max(0f, Sim.WaveTimer);
+            Text(new Rect(cx + boxW * 0.5f - 150, top + 4, 140, 22), $"wave in {(int)wave / 60}:{(int)wave % 60:00}", _small, Parch);
+            for (int t = 0; t < n; t++)
             {
+                float y = top + 30 + t * rowH;
                 var ts = Sim.Teams[t];
-                float x = t == 0 ? cx - 268 : cx + 148;
-                Text(new Rect(x, 18, 120, 30), ts.Alive.ToString(), _mid, Side(t));
-                Text(new Rect(x, 48, 120, 24), (ts.Attacking ? "▲ " : "■ ") + ts.TotalKills, _mid, ts.Attacking ? Amber : Parch);
+                Fill(new Rect(cx - boxW * 0.5f + 12, y + 5, 12, 12), Side(t));
+                Text(new Rect(cx - boxW * 0.5f + 30, y, 120, rowH), Team.Names[t] + (t == Sim.PlayerTeam ? "  (you)" : ""), _small, t == Sim.PlayerTeam ? Amber : Parch);
+                Text(new Rect(cx - boxW * 0.5f + 140, y, 90, rowH), $"{ts.Alive} men  {Sim.TanksOf(t)} veh", _small, Parch);
+                float held = Sim.Held[t], need = Mathf.Max(1f, tuning.holdToWin);
+                Fill(new Rect(cx - boxW * 0.5f + 240, y + 7, 120, 8), new Color(0.15f, 0.16f, 0.18f, 0.9f));
+                Fill(new Rect(cx - boxW * 0.5f + 240, y + 7, 120 * Mathf.Clamp01(held / need), 8), Side(t));
+                Text(new Rect(cx - boxW * 0.5f + 366, y, 60, rowH), $"{(int)held / 60}:{(int)held % 60:00}", _small, owner == t ? Side(t) : Parch);
             }
-            for (int o = 0; o < Front.Count; o++)
+            // and over the objective itself, where it is
+            var oc = Sim.Map.Objectives[Front.Centre];
+            if (Project(new Vector3(oc.x, Sim.Map.Height(oc) + 14f, oc.y), out var mark))
             {
-                // laid out as they are on the field
-                int row = Front.Row[o];
-                float down = row == 0 || row == 4 ? 1f : row == 2 ? o - 3 : (o == 1 || o == 6) ? 0.5f : 1.5f;
-                var r = new Rect(cx - 140 + row * 60, 70 - down * 27f, 40, 22);
-                Fill(r, Side(Sim.Owner[o]) * new Color(0.75f, 0.75f, 0.75f, 1f));
-                if (Sim.Capture[o] > 0f) Fill(new Rect(r.x, r.yMax - r.height * Sim.Capture[o], r.width, r.height * Sim.Capture[o]), Side(Sim.Capturing[o]));
-                if (o == Front.GreenBase || o == Front.GreyBase) { Fill(new Rect(r.x + 14, r.y + 3, 2, 16), new Color(0.1f, 0.08f, 0.06f)); Fill(new Rect(r.x + 16, r.y + 4, 11, 7), new Color(0.1f, 0.08f, 0.06f)); }
-                // and over each, where it is
-                var at3 = new Vector3(Sim.Map.Objectives[o].x, Sim.Map.Height(Sim.Map.Objectives[o]) + 12f, Sim.Map.Objectives[o].y);
-                if (Project(at3, out var mark)) { Fill(new Rect(mark.x - 5, mark.y - 5, 10, 10), new Color(0.07f, 0.06f, 0.05f, 0.7f)); Fill(new Rect(mark.x - 4, mark.y - 4, 8, 8), Side(Sim.Owner[o])); if (Sim.Capture[o] > 0f) Fill(new Rect(mark.x - 12, mark.y + 7, 24 * Sim.Capture[o], 3), Side(Sim.Capturing[o])); }
+                Fill(new Rect(mark.x - 6, mark.y - 6, 12, 12), new Color(0.04f, 0.05f, 0.06f, 0.7f));
+                Fill(new Rect(mark.x - 5, mark.y - 5, 10, 10), owner == 255 ? Parch : Side(owner));
             }
-            Fill(new Rect(cx - 140, 103, 280 * Mathf.Clamp01(1f - Sim.WaveTimer / Mathf.Max(1f, tuning.waveInterval)), 4), Amber);
 
             // ---- how it's running ----
             if (Options.Counter) {
@@ -598,12 +641,13 @@ namespace LSBS
             float fps = _avgMs > 0 ? 1000f / _avgMs : 0;
             Text(new Rect(20, 12, 200, 24), $"{fps:0} fps   ({_avgMs:0.0} ms)", _small, fps > 90 ? Green : fps > 55 ? Amber : new Color(1, 0.4f, 0.3f));
             Text(new Rect(20, 32, 200, 24), $"1% low  {_lowFps:0} fps", _small, Parch);
-            Text(new Rect(20, 52, 200, 24), $"battle {Sim.SimMs:0.00} ms   soldiers {Sim.Teams[0].Alive + Sim.Teams[1].Alive}", _small, Parch);
+            int everyone = 0; for (int t = 0; t < Sim.TeamCount; t++) everyone += Sim.Teams[t].Alive;
+            Text(new Rect(20, 52, 200, 24), $"battle {Sim.SimMs:0.00} ms   soldiers {everyone}", _small, Parch);
             Text(new Rect(20, 72, 200, 24), $"drawn {Drawn}   bodies {Corpses}", _small, Parch);
             Text(new Rect(20, 90, 200, 24), $"ragdolls {Ragdolls}", _small, Parch);
             }
 
-            if (Sim.Winner != 255) Text(new Rect(0, h * 0.3f, w, 70), Sim.Winner == 0 ? "THE GREENS TAKE THE FIELD" : "THE GREYS TAKE THE FIELD", _big, Side(Sim.Winner));
+            if (Sim.Winner != 255) Text(new Rect(0, h * 0.3f, w, 70), Team.Names[Sim.Winner].ToUpper() + (Sim.Winner == Sim.PlayerTeam ? " WINS  -  YOU WIN" : " WINS"), _big, Side(Sim.Winner));
 
             if (Player.IsDead)
             {
@@ -615,25 +659,11 @@ namespace LSBS
             else if (Player.InSoldier) SoldierHud(w, h, cx);
             else
             {
-                Fill(new Rect(cx - 1, h * 0.5f - 1, 3, 3), Parch);
-                if (Player.AimedTank >= 0 && Player.AimedTank < Sim.Tanks.Count)
-                {
-                    var tk = Sim.Tanks[Player.AimedTank];
-                    if (Project((Vector3)tk.Pos + Vector3.up * 4.6f, out var ta)) Text(new Rect(ta.x - 150, ta.y - 24, 300, 24), "Tank   F", _mid, Side(tk.Team));
-                }
-                if (Player.AimedSlot >= 0)
-                {
-                    var s = Sim.Slots[Player.AimedSlot];
-                    if (s.Alive && Project((Vector3)s.Pos + Vector3.up * 2.2f, out var at))
-                    {
-                        Text(new Rect(at.x - 150, at.y - 46, 300, 24), Names.Of(s, Player.AimedSlot), _mid, Side(s.Team));
-                        Text(new Rect(at.x - 150, at.y - 24, 300, 22), s.Class + "   F", _mid, Parch);
-                    }
-                }
-                Text(new Rect(20, h - 34, 900, 24), "WASD fly   Shift faster   F take over   1 / 2 deploy with the next green / grey wave   Tab command   Esc menu", _small, Parch);
+                Player.Rts.Draw(Side(Player.Rts.Team), Amber);
+                int picked = Player.Rts.Selected.Count, armour = Player.Rts.Vehicles.Count;
+                if (picked + armour > 0) Text(new Rect(20, h - 60, 900, 24), (picked > 0 ? picked + (picked == 1 ? " squad, " : " squads, ") + Player.Rts.SelectedSoldiers + " soldiers   " : "") + (armour > 0 ? armour + (armour == 1 ? " vehicle" : " vehicles") : "") + (Player.Rts.AirliftNext ? "     AIRLIFT: right-click where they're to go" : ""), _small, Amber);
+                Text(new Rect(20, h - 34, 1300, 24), "WASD / edge pan   Q E or MMB turn   Wheel zoom   LMB pick (drag for a box)   RMB move   B airlift   X let them decide   ` all   F take over   Esc menu", _small, Parch);
             }
-            if (Sim.PlayerDeploy >= 0) Text(new Rect(0, 108, w, 30), $"deploying in {Mathf.Max(0, Sim.WaveTimer):0}", _mid, Side(Sim.PlayerDeploy));
-            if (PanelOpen && !MenuOpen) Panel(h);
             _menu.Draw();
         }
 
@@ -664,19 +694,19 @@ namespace LSBS
             if (over >= 0)
             {
                 var o = Sim.Slots[over];
-                Text(new Rect(cx - 200, h * 0.5f + 40, 400, 26), Names.Of(o, over), _mid, Side(o.Team));
+                Text(new Rect(cx - 200, h * 0.5f + 40, 400, 26), o.Class.ToString(), _mid, Side(o.Team));
             }
             // the squad
             float ry = h * 0.5f - Player.Roster.Count * 12f - 30f;
             Fill(new Rect(14, ry - 6, 232, Player.Roster.Count * 24 + 36), new Color(0.07f, 0.06f, 0.05f, 0.6f));
-            Text(new Rect(24, ry, 220, 22), Names.Of(Sim.Slots[slot], slot), _small, Amber);
+            Text(new Rect(24, ry, 220, 22), "You   " + Sim.Slots[slot].Class, _small, Amber);
             ry += 26;
             foreach (var (ms, mg, mc) in Player.Roster)
             {
                 bool alive = Sim.Slots[ms].Alive && Sim.Slots[ms].Gen == mg;
                 var col = alive ? Parch : new Color(0.5f, 0.22f, 0.16f);
-                Text(new Rect(24, ry, 200, 22), Names.Of(ms, mg, Sim.Slots[slot].Team), _small, col);
-                Text(new Rect(206, ry, 36, 22), alive ? mc.ToString().Substring(0, 1) : "x", _small, alive ? Amber : col);
+                Text(new Rect(24, ry, 200, 22), mc.ToString(), _small, col);
+                Text(new Rect(206, ry, 36, 22), alive ? "" : "x", _small, alive ? Amber : col);
                 if (!alive) Fill(new Rect(24, ry + 11, 170, 1), col);
                 ry += 24;
             }
@@ -724,74 +754,24 @@ namespace LSBS
                 int left = Sim.EntityManager.GetComponentData<Ability>(e).Grenades;
                 for (int i = 0; i < left; i++) Fill(new Rect(w - 120 + i * 22, h - 112, 14, 14), new Color(0.55f, 0.6f, 0.35f));
             }
-            else if (Player.Class == SoldierClass.Communicator)
-                Text(new Rect(w - 220, h - 116, 196, 24), Sim.IsCalling(slot) ? "guns firing" : Player.CanCall ? "guns ready  (E)" : "no guns free", _small, Player.CanCall ? Amber : Parch);
-            Text(new Rect(20, h - 34, 900, 24), "WASD move   Shift run   C kneel   RMB aim   R reload   " + (Player.Class == SoldierClass.Sweeper ? "E grenade   " : Player.Class == SoldierClass.Communicator ? "E artillery   " : Player.Class == SoldierClass.Gunner && able.Carrying ? "E set up Maxim (kneel: low, stand: high)   " : "") + "G squad " + (q.PlayerHold ? "holding" : "following") + "   Q leave", _small, Parch);
-        }
-
-        int _pick = 500;
-        readonly string[] _waveText = new string[2];
-
-        /// <summary>Both commanders' places at once, while looking on: waves, their size, and orders.</summary>
-        void Panel(float h)
-        {
-            float wide = 300f, x0 = 10f, y0 = 124f;
-            for (int t = 0; t < 2; t++)
+            else if (Player.Class == SoldierClass.Launcher)
             {
-                var r = new Rect(x0 + t * (wide + 10f), y0, wide, 240);
-                Fill(r, new Color(0.07f, 0.06f, 0.05f, 0.92f));
-                Fill(new Rect(r.x, r.y, r.width, 3), Side(t));
-                float x = r.x + 14, y = r.y + 12, w = r.width - 28;
-                Text(new Rect(x, y, w, 26), t == 0 ? "GREENS" : "GREYS", _mid, Side(t));
-                y += 34;
-                Text(new Rect(x, y, 150, 24), "Soldiers a wave", _small, Parch);
-                string name = "wave" + t;
-                GUI.SetNextControlName(name);
-                bool typing = GUI.GetNameOfFocusedControl() == name;
-                if (!typing || _waveText[t] == null) _waveText[t] = Sim.WaveSize[t].ToString();
-                _waveText[t] = GUI.TextField(new Rect(x + w - 70, y, 70, 24), _waveText[t], 5);
-                if (typing && int.TryParse(_waveText[t], out int n)) Sim.WaveSize[t] = Mathf.Clamp(n, 0, 5000);
-                y += 28;
-                float now = GUI.HorizontalSlider(new Rect(x, y, w, 16), Sim.WaveSize[t], 0, 1000);
-                if (Mathf.Abs(now - Sim.WaveSize[t]) > 0.5f) { Sim.WaveSize[t] = Mathf.RoundToInt(now / 10f) * 10; GUI.FocusControl(null); }
-                y += 26;
-                if (GUI.Button(new Rect(x, y, w, 34), "Send a wave now") && Sim.Running) Sim.SpawnNow((byte)t, Sim.WaveSize[t]);
-                y += 46;
-                Text(new Rect(x, y, w, 22), "Orders", _small, Parch);
-                y += 24;
-                string[] names = { "Captains decide", "Attack", "Defend" };
-                for (int o = 0; o < 3; o++)
+                bool ready = able.Cooldown <= 0f;
+                Fill(new Rect(w - 222, h - 120, 200, 10), new Color(0.07f, 0.06f, 0.05f, 0.72f));
+                Fill(new Rect(w - 220, h - 118, 196 * Mathf.Clamp01(1f - able.Cooldown / Mathf.Max(1f, tuning.missileCooldown)), 6), ready ? Amber : Parch);
+                Text(new Rect(w - 222, h - 144, 200, 22), ready ? "missile ready" : $"reloading  {able.Cooldown:0}s", _small, ready ? Amber : Parch);
+                int lockOn = ready ? Player.LockOn() : -1;
+                int air = lockOn - Sim.Tanks.Count;
+                if (lockOn >= 0 && air < Sim.Flights.Count && Project(Sim.Flights[air].Pos, out var lk))
                 {
-                    var b = new Rect(x + (o == 0 ? 0 : w * 0.46f + (o - 1) * w * 0.28f), y, o == 0 ? w * 0.44f : w * 0.26f, 34);
-                    if (GUI.Button(b, names[o]) && Sim.Running) Sim.Order(t, o);
-                    if (Sim.Orders[t] == o) Fill(new Rect(b.x, b.yMax, b.width, 3), Amber);
+                    Fill(new Rect(lk.x - 18, lk.y - 18, 36, 2), Amber); Fill(new Rect(lk.x - 18, lk.y + 16, 36, 2), Amber);
+                    Fill(new Rect(lk.x - 18, lk.y - 18, 2, 36), Amber); Fill(new Rect(lk.x + 16, lk.y - 18, 2, 36), Amber);
+                    Text(new Rect(lk.x - 60, lk.y + 20, 120, 22), "LOCKED  E", _small, Amber);
                 }
             }
-            var box = new Rect(x0, y0 + 250, wide * 2 + 10, 198);
-            Fill(box, new Color(0.07f, 0.06f, 0.05f, 0.92f));
-            float yy = box.y + 8;
-            float Row(string label, float v, float lo, float hi, string fmt, int col)
-            {
-                float x = box.x + 14 + col * 305f;
-                Text(new Rect(x, yy, 200, 22), label, _small, Parch);
-                Text(new Rect(x + 220, yy, 60, 22), v.ToString(fmt), _small, Amber);
-                return GUI.HorizontalSlider(new Rect(x, yy + 22, 270, 16), v, lo, hi);
-            }
-            tuning.waveInterval = Row("Seconds between waves", tuning.waveInterval, 5, 300, "0", 0);
-            tuning.aimMax = Row("Longest aim (s)", tuning.aimMax, tuning.aimMin, 6, "0.0", 1);
-            yy += 44;
-            tuning.closeHit = Row("Hit chance up close", tuning.closeHit, 0, 1, "0.00", 0);
-            tuning.maxRangeHit = Row("Hit chance at full range", tuning.maxRangeHit, 0, 1, "0.00", 1);
-            yy += 44;
-            _pick = Mathf.RoundToInt(Row("Soldiers a side (on restart)", _pick, 50, 10000, "0", 0) / 50f) * 50;
-            tuning.battlefieldModifiers = GUI.Toggle(new Rect(box.x + 319, yy + 4, 270, 22), tuning.battlefieldModifiers, "  kneeling, moving and suppression count");
-            yy += 48;
-            if (GUI.Button(new Rect(box.x + 14, yy, 130, 30), "Restart")) Restart(_pick);
-            if (GUI.Button(new Rect(box.x + 154, yy, 130, 30), "New field"))
-            {
-                Bench.BeginGreen = Sim.Caps[0]; Bench.BeginGrey = Sim.Caps[1];
-                NewField();
-            }
+            else if (Player.Class == SoldierClass.Communicator)
+                Text(new Rect(w - 220, h - 116, 196, 24), Sim.IsCalling(slot) ? "guns firing" : Player.CanCall ? "guns ready  (E)" : "no guns free", _small, Player.CanCall ? Amber : Parch);
+            Text(new Rect(20, h - 34, 900, 24), "WASD move   Shift run   C kneel   RMB aim   R reload   " + (Player.Class == SoldierClass.Sweeper ? "E grenade   " : Player.Class == SoldierClass.Launcher ? "E missile (follows aircraft, flies straight at anything else)   " : Player.Class == SoldierClass.Communicator ? "E artillery   " : Player.Class == SoldierClass.Gunner && able.Carrying ? "E set up Maxim (kneel: low, stand: high)   " : "") + "G squad " + (q.PlayerHold ? "holding" : "following") + "   Q leave", _small, Parch);
         }
     }
 
@@ -802,7 +782,6 @@ namespace LSBS
     {
         public static bool HideHud;
         public static uint NextSeed;
-        public static int BeginGreen, BeginGrey;
         public static bool Asked => _counts != null || _shots != null;
         static int[] _counts;
         static string _out, _shots;
@@ -864,7 +843,7 @@ namespace LSBS
             // everyone who falls is replaced at once, so the numbers hold through the measurement
             b.tuning.waveInterval = 1f;
             b.tuning.waveSize = _counts[_at];
-            b.Restart(_counts[_at]);
+            b.StartNow(GameSetup.Even(2, _counts[_at] / Squad.Size, b.tuning));
         }
 
         /// <summary>Pictures at set moments, for checking how it looks.</summary>
@@ -928,9 +907,9 @@ namespace LSBS
                 case 0: b.Player.Place(new Vector3(-150f, 40f, -100f), 60f, 18f); break;
                 case 1: Close(0, SoldierClass.Infantry, true, 1f); break;
                 case 2: Close(0, SoldierClass.Infantry, false, -1f); break;
-                case 3: Close(0, SoldierClass.Communicator, false, -1f); break;
+                case 3: Close(0, SoldierClass.Launcher, false, -1f); break;
                 case 4: Close(1, SoldierClass.Infantry, true, 1f); break;
-                case 5: Close(1, SoldierClass.Communicator, false, -1f); break;
+                case 5: Close(1, SoldierClass.Launcher, false, -1f); break;
                 case 6: Close(1, SoldierClass.Sweeper, false, 1f); break;
                 case 7: b.Player.Place(new Vector3(-70f, 34f, -100f), 42f, 18f); break;
                 case 8: b.Player.Place(new Vector3(-34f, 9f, -100f), 70f, 10f); break;

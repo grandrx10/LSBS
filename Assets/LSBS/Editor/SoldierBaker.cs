@@ -13,7 +13,7 @@ namespace LSBS.EditorTools
     public static partial class SoldierBaker
     {
         public const string Folder = "Assets/LSBS/Generated", DataPath = Folder + "/Soldiers.asset", RagdollPath = Folder + "/Ragdoll.prefab";
-        const string PlayerPath = "Assets/Prefab/NetPlayer.prefab", RiflePath = "Assets/Models/Sebastion.prefab", ShotgunPath = "Assets/Models/Rachmaninoff.prefab";
+        const string PlayerPath = "Assets/Prefab/NetPlayer.prefab", RiflePath = "Assets/Models/LR-15.prefab", ShotgunPath = "Assets/Models/Rachmaninoff.prefab";
         const float RifleScale = 0.6f;
 
         /// <summary>Who a part is for, as the shader reads it (the last number on each corner).</summary>
@@ -22,9 +22,10 @@ namespace LSBS.EditorTools
         /// <summary>The Maxim: twice the size it once was, and its own scale (1.5) on top of that.</summary>
         const float MaximScale = 0.8f;
 
-        static Color Walnut => MeshBuilder.Col(0x3f2716);
+        // the LR-15 and the rest in polymer and steel now, not walnut and brass
+        static Color Walnut => MeshBuilder.Col(0x24282d);
         static Color GunSteel => MeshBuilder.Col(0x54565a, MeshBuilder.Metal);
-        static Color GunBrass => MeshBuilder.Col(0x9c7433, MeshBuilder.Metal);
+        static Color GunBrass => MeshBuilder.Col(0x8f9aa6, MeshBuilder.Metal);
         static Color GunBlack => MeshBuilder.Col(0x2c2d30, MeshBuilder.Metal);
 
         static Transform Deep(Transform t, string n) => t.GetComponentsInChildren<Transform>(true).FirstOrDefault(c => c.name == n);

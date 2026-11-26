@@ -164,6 +164,14 @@ namespace LSBS
             Add(new Particle { Pos = p, Vel = d * 0.02f, Size = 0.16f, Length = 4f, Life = 0.2f, Shape = 2, Additive = 1, Color = ShellGlow, Seed = _rng.NextFloat() });
         }
 
+        /// <summary>A missile's motor, and the smoke it leaves.</summary>
+        public void MissileTrail(float3 p, float3 vel)
+        {
+            float3 d = math.normalizesafe(vel);
+            Add(new Particle { Pos = p, Vel = d * 0.02f, Size = 0.12f, Length = 2.5f, Life = 0.1f, Shape = 2, Additive = 1, Color = ShellGlow, Seed = _rng.NextFloat() });
+            Add(new Particle { Pos = p - d * 0.4f, Vel = _rng.NextFloat3(-0.3f, 0.3f), Size = 0.25f, Grow = 0.8f, Life = 1.8f, Drag = 1f, Color = Smoke, Seed = _rng.NextFloat() });
+        }
+
         public void CannonFire(float3 at, float3 d, Vector3 cam)
         {
             float far = math.distance(at, cam);

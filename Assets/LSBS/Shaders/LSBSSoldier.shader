@@ -24,6 +24,7 @@ Shader "LSBS/Soldier"
         StructuredBuffer<float> _Upper;
         int _BoneCount, _ChestBone, _HeadBone, _HelmetBone;
         float3 _ChestPivot;
+        float4 _TeamColours[8];
 
         struct Attributes
         {
@@ -170,8 +171,20 @@ Shader "LSBS/Soldier"
                 half shade = lerp(0.8, 1.15, frac(i.misc.x * 7.31));
                 // mud creeps up from the boots (bind pose: z is up the body in the model's own space)
                 half mud = saturate(0.35 - i.local.z * 0.22) * 0.8;
-                half4 c = LSBSShade(i.color.rgb * shade, i.color.a, i.positionWS, N, i.positionCS, at, mud, i.local.w);
                 uint flags = (uint)i.misc.y;
+                // the one kit, made over: cloth turns to the side's colour (darker cloth to near-black armour
+                // weave), metal to cool gunmetal, and a thin line of light where the two meet the body's middle
+                half3 base = i.color.rgb;
+                half lum = dot(base, half3(0.3, 0.59, 0.11));
+                half3 team = _TeamColours[(flags >> 8) & 7].rgb;
+                half3 cloth = lerp(half3(0.035, 0.04, 0.045), team * 0.85, saturate(lum * 3.2 - 0.12));
+                half3 metal = lerp(half3(0.09, 0.1, 0.115), half3(0.42, 0.45, 0.5), saturate(lum * 2.5));
+                // and whatever glows (visor, core, cell) glows in the side's colour
+                half3 made = i.color.a < 0.25 ? cloth : i.color.a < 0.75 ? metal : team * 1.6;
+                half4 c = LSBSShade(made * shade, i.color.a, i.positionWS, N, i.positionCS, at, mud * 0.25, i.local.w);
+                // a band of the side's colour, glowing faintly, round the chest
+                half band = saturate(1 - abs(i.local.z - 1.32) * 40);
+                c.rgb += team * band * 0.35;
                 if (flags & 4)
                 {
                     half3 V = normalize(GetWorldSpaceViewDir(i.positionWS));

@@ -7,13 +7,18 @@ using UnityEngine;
 
 namespace LSBS
 {
-    /// <summary>What soldiers need to know of a tank.</summary>
+    public enum TankKind : byte { Tank, Destroyer }
+
+    /// <summary>What soldiers need to know of a tank (or anything else they might shoot a missile at).</summary>
     public struct TankState
     {
         public float3 Pos;
         public float Yaw, Speed;
         public byte Team;
         public bool Wreck;
+        public float HalfWide, HalfLong;
+        /// <summary>Up in the air: no use throwing grenades at it or stepping out of its way.</summary>
+        public bool Flying;
 
         /// <summary>A place in the tank's own frame (x right, y ahead).</summary>
         public float2 Local(float2 p)
@@ -30,21 +35,46 @@ namespace LSBS
         }
     }
 
+    /// <summary>
+    /// The two kinds' shapes, from the blockouts: the tank, a turret on a hull between two tracks, with a machine gun port in
+    /// its nose; the destroyer, longer and lower, its gun fixed in the front of a casemate.
+    /// </summary>
+    public static class TankShape
+    {
+        public static float HalfWide(TankKind k) => k == TankKind.Tank ? 3.0f : 3.4f;
+        public static float HalfLong(TankKind k) => k == TankKind.Tank ? 3.75f : 5.6f;
+        public static float Top(TankKind k) => k == TankKind.Tank ? 2.5f : 4.1f;
+        /// <summary>Where the track centres are, either side.</summary>
+        public static float Gauge(TankKind k) => k == TankKind.Tank ? 2.4f : 2.9f;
+        /// <summary>What the turret turns about (the destroyer's gun turns only a little, in its own mount).</summary>
+        public static readonly Vector3 TurretPivot = new(0f, 2.45f, -0.1f);
+        /// <summary>Where the gun's trunnion is, the turret straight ahead.</summary>
+        public static Vector3 Cannon(TankKind k) => k == TankKind.Tank ? new Vector3(0f, 3.3f, 1.35f) : new Vector3(0f, 2.65f, 4.75f);
+        public static float CannonLength(TankKind k) => k == TankKind.Tank ? 3.9f : 3.6f;
+        /// <summary>How far round the gun goes either way.</summary>
+        public static float Arc(TankKind k) => k == TankKind.Tank ? math.PI : 0.26f;
+        public static int Guns(TankKind k) => k == TankKind.Tank ? 1 : 0;
+        /// <summary>The machine gun in the tank's nose: where, and facing straight ahead.</summary>
+        public static readonly Vector3 GunPort = new(0.6f, 1.85f, 2.85f);
+        public static readonly Vector3[] Exhausts = { new(-1.6f, 2.3f, -3.6f), new(1.6f, 2.3f, -3.6f) };
+    }
+
     public class TankGun
     {
-        public float Yaw, Pitch, WantYaw, WantPitch; // from straight out to its side
+        public float Yaw, Pitch, WantYaw, WantPitch; // from straight out
         public int Ammo = Maxim.Clip, Target = -1, TargetGen;
         public float Reloading, Timer, Think;
     }
 
     public class Tank
     {
-        public const float Health0 = 24f, ShellHurt = 8f, GrenadeHurt = 3f; // three shells, or eight grenades
-        public const float TopSpeed = 4.4f, Reverse = 2.2f, TurnRate = 0.55f, CannonArc = 0.262f, ReloadTime = 5f, ShellSpeed = 78f;
-        public const float SideArc = 1.35f;
+        /// <summary>Hit points: a tank's shell takes a quarter, a destroyer's half; a grenade an eighth.</summary>
+        public const float Health0 = 1000f, ShellHurt = 250f, GrenadeHurt = 125f;
+        public const float TopSpeed = 5.2f, Reverse = 2.6f, TurnRate = 0.6f, ReloadTime = 5f, ShellSpeed = 90f;
+        public const float SideArc = 1.0f;
         public const float WreckStay = 45f, SinkTime = 14f;
-        public const float HalfWide = 2.5f, HalfLong = 3.95f;
 
+        public TankKind Kind;
         public byte Team;
         public float3 Pos;
         public float Yaw, Pitch, Roll;
@@ -54,7 +84,7 @@ namespace LSBS
         public bool Trigger;
         public float Health = Health0;
         public float TrackL, TrackR;
-        public readonly TankGun[] Guns = { new(), new() };
+        public readonly TankGun[] Guns = { new() };
         public readonly List<(int slot, int gen)> Crew = new();
         public int Objective = -1;
         public float Think, AimThink, Stuck, Backing, BackSteer;
@@ -66,24 +96,43 @@ namespace LSBS
         /// <summary>Where its gun's laid, worked out once a frame for whoever's driving it.</summary>
         public float3 Laid;
         public int LaidFrame = -1;
-        /// <summary>The person's slot and seat (0 driving and the main gun, 1 the left gun, 2 the right), or -1.</summary>
+        /// <summary>The person's slot and seat (0 driving and the main gun, 1 the machine gun), or -1.</summary>
         public int Player = -1, Seat;
         public float Rumble;
+        /// <summary>Sent somewhere by its commander.</summary>
+        public bool Ordered;
+        public float2 OrderAt;
+        public int Field = -1;
+        /// <summary>Slung under a transport, or null.</summary>
+        public Aircraft Carrier;
+
+        public float HalfWide => TankShape.HalfWide(Kind);
+        public float HalfLong => TankShape.HalfLong(Kind);
+        public float Arc => TankShape.Arc(Kind);
+        public int GunCount => TankShape.Guns(Kind);
+        /// <summary>A destroyer's shell does as much as two of a tank's.</summary>
+        public float Hurt => Kind == TankKind.Destroyer ? ShellHurt * 2f : ShellHurt;
+        public bool Carried => Carrier != null;
 
         public Quaternion Rotation => Quaternion.Euler(Pitch * Mathf.Rad2Deg, Yaw * Mathf.Rad2Deg, Roll * Mathf.Rad2Deg);
         public Vector3 At(Vector3 local) => (Vector3)Pos + Rotation * local;
         public float3 Forward => new(math.sin(Yaw), 0, math.cos(Yaw));
+        /// <summary>The turret, turned with the gun (the destroyer has none: its gun turns in its mount).</summary>
+        public Quaternion TurretRotation => Kind == TankKind.Tank ? Rotation * Quaternion.Euler(0, CannonYaw * Mathf.Rad2Deg, 0) : Rotation;
+        public Vector3 CannonBase => Kind == TankKind.Tank
+            ? At(TankShape.TurretPivot) + TurretRotation * (TankShape.Cannon(Kind) - TankShape.TurretPivot)
+            : At(TankShape.Cannon(Kind));
         public Quaternion CannonRotation => Rotation * Quaternion.Euler(CannonPitch * Mathf.Rad2Deg, CannonYaw * Mathf.Rad2Deg, 0);
-        public Vector3 Muzzle => At(TankModel.Cannon) + CannonRotation * Vector3.forward * (TankModel.CannonLength + 0.1f);
-        public Quaternion GunRotation(int side) => Rotation * Quaternion.Euler(0, side == 0 ? -90f : 90f, 0) * Quaternion.Euler(Guns[side].Pitch * Mathf.Rad2Deg, Guns[side].Yaw * Mathf.Rad2Deg, 0);
-        public Vector3 GunAt(int side) => At(TankModel.SideGun(side));
-        public TankState State => new() { Pos = Pos, Yaw = Yaw, Speed = Speed, Team = Team, Wreck = Wreck };
+        public Vector3 Muzzle => CannonBase + CannonRotation * Vector3.forward * (TankShape.CannonLength(Kind) + 0.1f);
+        public Quaternion GunRotation(int g) => Rotation * Quaternion.Euler(Guns[g].Pitch * Mathf.Rad2Deg, Guns[g].Yaw * Mathf.Rad2Deg, 0);
+        public Vector3 GunAt(int g) => At(TankShape.GunPort);
+        public TankState State => new() { Pos = Pos, Yaw = Yaw, Speed = Speed, Team = Team, Wreck = Wreck || Carried, HalfWide = HalfWide, HalfLong = HalfLong };
 
         /// <summary>How far a place is from its sides (0 inside).</summary>
         public float Distance(float3 p)
         {
             var l = Quaternion.Inverse(Rotation) * (Vector3)(p - Pos);
-            var d = new Vector3(Mathf.Max(0f, Mathf.Abs(l.x) - TankModel.SponsonOut + 0.4f), Mathf.Max(0f, Mathf.Max(-l.y, l.y - TankModel.HullY1)), Mathf.Max(0f, Mathf.Abs(l.z) - HalfLong));
+            var d = new Vector3(Mathf.Max(0f, Mathf.Abs(l.x) - HalfWide + 0.2f), Mathf.Max(0f, Mathf.Max(-l.y, l.y - TankShape.Top(Kind) - (Kind == TankKind.Tank ? 1.5f : 0f))), Mathf.Max(0f, Mathf.Abs(l.z) - HalfLong));
             return d.magnitude;
         }
     }
@@ -91,12 +140,12 @@ namespace LSBS
     public struct TankShell
     {
         public float3 Pos, Vel;
-        public float Life;
+        public float Life, Hurt;
         public byte Team;
         public int Shooter, ShooterGen;
     }
 
-    public partial class BattleSystem
+    public unsafe partial class BattleSystem
     {
         public readonly List<Tank> Tanks = new();
         public readonly List<TankShell> Shells = new();
@@ -105,7 +154,6 @@ namespace LSBS
         public NativeArray<byte> TankBlocked;
         public NativeArray<sbyte> TankFlow;
         public int TanksLost;
-        readonly float[] _tankDue = new float[2];
 
         NativeList<TankRest> _rest;
         NativeList<GunSearch> _search;
@@ -119,25 +167,32 @@ namespace LSBS
 
         void TankDestroy() { _tankStates.Dispose(); _rest.Dispose(); _search.Dispose(); }
 
-        /// <summary>Looking about for all the side guns whose turn it is, together.</summary>
+        public int TanksOf(int team)
+        {
+            int n = 0;
+            foreach (var t in Tanks) if (!t.Wreck && t.Team == team) n++;
+            return n;
+        }
+
+        /// <summary>Looking about for all the machine guns whose turn it is, together.</summary>
         void SearchGuns(float dt)
         {
             _search.Clear();
             for (int i = 0; i < Tanks.Count; i++)
             {
                 var t = Tanks[i];
-                if (t.Wreck || t.Crew.Count == 0) continue;
-                for (int side = 0; side < 2; side++)
+                if (t.Wreck || t.Carried || t.Crew.Count == 0) continue;
+                for (int g = 0; g < t.GunCount; g++)
                 {
-                    var g = t.Guns[side];
-                    g.Think -= dt;
-                    if (g.Think > 0f || t.Player >= 0 && t.Seat == side + 1) continue;
-                    g.Think = _rng.NextFloat(0.35f, 0.6f);
-                    _search.Add(new GunSearch { From = t.GunAt(side), Inverse = Quaternion.Inverse(t.Rotation * Quaternion.Euler(0, side == 0 ? -90f : 90f, 0)), Team = t.Team, Tank = i, Side = side });
+                    var gun = t.Guns[g];
+                    gun.Think -= dt;
+                    if (gun.Think > 0f || t.Player >= 0 && t.Seat == g + 1) continue;
+                    gun.Think = _rng.NextFloat(0.35f, 0.6f);
+                    _search.Add(new GunSearch { From = t.GunAt(g), Inverse = Quaternion.Inverse(t.Rotation), Team = t.Team, Tank = i, Side = g });
                 }
             }
             if (_search.Length == 0) return;
-            new GunSearchJob { Guns = _search.AsArray(), Slots = Slots, Green = _green, Grey = _grey, Map = Map, Range = T.maxRange * T.tankGunRange, Arc = Tank.SideArc }.Schedule(_search.Length, 1).Complete();
+            new GunSearchJob { Guns = _search.AsArray(), Slots = Slots, All = _all, Map = Map, Range = T.maxRange * T.tankGunRange, Arc = Tank.SideArc }.Schedule(_search.Length, 1).Complete();
             for (int i = 0; i < _search.Length; i++)
             {
                 var s = _search[i];
@@ -151,11 +206,12 @@ namespace LSBS
         void SettleAll(float dt)
         {
             _rest.Clear();
-            foreach (var t in Tanks) _rest.Add(new TankRest { Pos = t.Pos.xz, Yaw = t.Yaw });
+            foreach (var t in Tanks) _rest.Add(new TankRest { Pos = t.Pos.xz, Yaw = t.Yaw, Gauge = TankShape.Gauge(t.Kind), Reach = t.HalfLong - 0.4f });
             if (_rest.Length == 0) return;
             new TankRestJob { Tanks = _rest.AsArray(), Map = Map }.Schedule(_rest.Length, 4).Complete();
             for (int i = 0; i < Tanks.Count; i++)
             {
+                if (Tanks[i].Carried) continue;
                 Settle(Tanks[i], _rest[i], dt);
                 if (Tanks[i].Wreck && Tanks[i].WreckTime > Tank.WreckStay) Tanks[i].Fall = 0f;
             }
@@ -165,76 +221,37 @@ namespace LSBS
         {
             Tanks.Clear();
             Shells.Clear();
-            _tankDue[0] = _tankDue[1] = 0f;
             TanksLost = 0;
         }
 
         // ------------------------------------------------------------------ arriving
 
-        /// <summary>One for every so many soldiers who've come up.</summary>
-        void TanksFor(byte team, int soldiers)
-        {
-            if (T.soldiersPerTank <= 0 || soldiers <= 0) return;
-            _tankDue[team] += soldiers;
-            int alive = 0;
-            foreach (var t in Tanks) if (!t.Wreck && t.Team == team) alive++;
-            while (_tankDue[team] >= T.soldiersPerTank)
-            {
-                _tankDue[team] -= T.soldiersPerTank;
-                if (alive++ < T.maxTanks) SpawnTank(team);
-            }
-        }
-
-        bool TankCanStand(float2 p)
+        bool TankCanStand(float2 p, float r = 9.5f)
         {
             if (math.abs(p.x) > MapView.HalfW - 8f || math.abs(p.y) > MapView.HalfH - 8f || TankBlocked[MapView.Index(p)] != 0) return false;
-            foreach (var t in Tanks) if (math.distancesq(t.Pos.xz, p) < 9.5f * 9.5f) return false;
+            foreach (var t in Tanks) if (!t.Carried && math.distancesq(t.Pos.xz, p) < r * r) return false;
             return true;
         }
 
-        void SpawnTank(byte team)
+        /// <summary>A tank and its crew of four, at a place. The person playing's own wait there for orders.</summary>
+        public Tank SpawnTank(byte team, TankKind kind, float3 at, float yaw)
         {
-            float side = team == Team.Green ? -1f : 1f;
-            float2 home = Map.Objectives[Front.Home(team)];
-            for (int tries = 0; tries < 60; tries++)
+            int squad = SpawnSquad(team, at.xz, 4, true);
+            if (squad < 0) return null;
+            var t = new Tank { Kind = kind, Team = team, Pos = at, Yaw = yaw };
+            if (team == PlayerTeam) { t.Ordered = true; t.OrderAt = at.xz; t.Field = -1; }
+            int index = Tanks.Count;
+            Tanks.Add(t);
+            var q = Squads[squad];
+            for (int m = 0; m < Squad.Size; m++)
             {
-                float2 p = home + new float2(side * _rng.NextFloat(-24f, 2f), _rng.NextFloat(-95f, 95f));
-                if (!TankCanStand(p)) continue;
-                int from = HighSlot;
-                int squad = SpawnCrew(team, p);
-                if (squad < 0) return;
-                var t = new Tank { Team = team, Pos = new float3(p.x, Map.Height(p), p.y), Yaw = -side * math.PI * 0.5f };
-                int index = Tanks.Count;
-                Tanks.Add(t);
-                unsafe
-                {
-                    var q = Squads[squad];
-                    for (int m = 0; m < Squad.Size; m++)
-                    {
-                        int slot = q.Members[m];
-                        if (slot < 0) continue;
-                        t.Crew.Add((slot, Slots[slot].Gen));
-                        Board(slot, index);
-                    }
-                }
-                return;
+                int slot = q.Members[m];
+                if (slot < 0) continue;
+                t.Crew.Add((slot, Slots[slot].Gen));
+                Board(slot, index);
             }
+            return t;
         }
-
-        /// <summary>Four soldiers, a squad to themselves.</summary>
-        int SpawnCrew(byte team, float2 at)
-        {
-            _crewAt = at;
-            _crewSquad = -1;
-            _spawningCrew = true;
-            Spawn(team, 4);
-            _spawningCrew = false;
-            return _crewSquad;
-        }
-
-        bool _spawningCrew;
-        float2 _crewAt;
-        int _crewSquad;
 
         void Board(int slot, int tank)
         {
@@ -253,7 +270,7 @@ namespace LSBS
         public void PlayerBoards(int slot, int tank, int seat)
         {
             var t = Tanks[tank];
-            if (t.Wreck) return;
+            if (t.Wreck || t.Carried) return;
             if (!t.Crew.Contains((slot, Slots[slot].Gen))) t.Crew.Add((slot, Slots[slot].Gen));
             Board(slot, tank);
             t.Player = slot;
@@ -277,7 +294,7 @@ namespace LSBS
                 t.Crew.Remove((slot, st.Gen));
                 var ts = t.State;
                 float2 p = ts.Pos.xz;
-                foreach (var l in new[] { new float2(0, -5.2f), new float2(-4.4f, 0), new float2(4.4f, 0), new float2(0, 5.2f) })
+                foreach (var l in new[] { new float2(0, -t.HalfLong - 1.4f), new float2(-t.HalfWide - 1.2f, 0), new float2(t.HalfWide + 1.2f, 0), new float2(0, t.HalfLong + 1.4f) })
                 {
                     p = MapView.Clamp(ts.World(l));
                     if (!Map.IsBlocked(p)) break;
@@ -299,7 +316,7 @@ namespace LSBS
             for (int i = 0; i < Tanks.Count; i++)
             {
                 var t = Tanks[i];
-                if (t.Wreck || t.Team != team) continue;
+                if (t.Wreck || t.Carried || t.Team != team) continue;
                 float k = t.Distance(new float3(p.x, t.Pos.y + 1f, p.y));
                 if (k < d) { d = k; best = i; }
             }
@@ -310,19 +327,21 @@ namespace LSBS
 
         void TankTick(float dt)
         {
+            ApplyTankOrders();
             SearchGuns(dt);
             for (int i = 0; i < Tanks.Count; i++)
             {
                 var t = Tanks[i];
                 if (t.Wreck) { Rot(t, dt); continue; }
                 t.Crew.RemoveAll(c => !Is(c.slot, c.gen));
+                if (t.Carried) { t.Speed = 0f; t.Throttle = t.Steer = 0f; t.Trigger = false; continue; }
                 if (t.Player >= 0 && (!Is(t.Player, Slots[t.Player].Gen) || !Slots[t.Player].Player)) t.Player = -1;
                 bool manned = t.Crew.Count > 0;
                 bool driven = t.Player >= 0 && t.Seat == 0;
                 if (!driven) { t.Trigger = false; if (manned) Drive(t, dt); else { t.Throttle = t.Steer = 0f; } }
                 Move(t, dt);
                 MainGun(t, dt);
-                for (int g = 0; g < 2; g++) SideGun(t, g, dt, manned);
+                for (int g = 0; g < t.GunCount; g++) SideGun(t, g, dt, manned);
                 Crush(t);
             }
             SettleAll(dt);
@@ -362,6 +381,26 @@ namespace LSBS
         /// <summary>How far down a wreck's gone.</summary>
         public static float Sunk(Tank t) => t.Wreck ? math.saturate((t.WreckTime - Tank.WreckStay) / Tank.SinkTime) * 3.6f : 0f;
 
+        // ------------------------------------------------------------------ orders
+
+        /// <summary>The commander's tanks: sent somewhere, they drive there by their own way.</summary>
+        public readonly List<(Tank tank, float2 at)> TankCommands = new();
+
+        public void OrderTank(Tank t, float2 at) => TankCommands.Add((t, at));
+
+        void ApplyTankOrders()
+        {
+            foreach (var (t, at) in TankCommands)
+            {
+                if (t == null || t.Wreck || t.Carried) continue;
+                t.Ordered = true;
+                t.OrderAt = MapView.Clamp(at);
+                t.Field = TankFieldTo(t.OrderAt);
+                t.Backing = 0f;
+            }
+            TankCommands.Clear();
+        }
+
         // ------------------------------------------------------------------ driving
 
         static float Wrap(float a) => a - math.PI * 2f * math.round(a / (math.PI * 2f));
@@ -369,7 +408,7 @@ namespace LSBS
         void Drive(Tank t, float dt)
         {
             t.Think -= dt;
-            if (t.Think <= 0f || t.Objective < 0) { t.Think = 4f; t.Objective = TankObjective(t); }
+            if (t.Think <= 0f || t.Objective < 0) { t.Think = 4f; t.Objective = Front.Centre; }
             t.AimThink -= dt;
             if (t.AimThink <= 0f) { t.AimThink = _rng.NextFloat(0.7f, 1.1f); PickTarget(t); }
 
@@ -381,35 +420,40 @@ namespace LSBS
                 return;
             }
 
-            // something to shoot that the gun can't be brought round to: bring the tank round
+            // something to shoot: a turret just turns to it; a destroyer brings the whole of itself round
             if (t.HasAim)
             {
                 float2 d = t.Aim.xz - t.Pos.xz;
                 float off = Wrap(math.atan2(d.x, d.y) - t.Yaw);
                 Elevate(t, t.Aim);
                 bool ready = t.Reload < 1.2f;
-                if (t.Enemy != null || ready)
+                bool laid = math.abs(Wrap(t.WantCannonYaw - t.CannonYaw)) < 0.02f && math.abs(t.WantCannonPitch - t.CannonPitch) < 0.03f;
+                if (t.Kind == TankKind.Destroyer && (t.Enemy != null || ready))
                 {
                     t.Throttle = 0f;
-                    t.Steer = math.abs(off) > Tank.CannonArc * 0.8f ? math.clamp(off * 2.2f, -1f, 1f) : 0f;
-                    t.Trigger = math.abs(off) < Tank.CannonArc && math.abs(Wrap(t.WantCannonYaw - t.CannonYaw)) < 0.02f && math.abs(t.WantCannonPitch - t.CannonPitch) < 0.03f;
+                    t.Steer = math.abs(off) > t.Arc * 0.8f ? math.clamp(off * 2.2f, -1f, 1f) : 0f;
+                    t.Trigger = math.abs(off) < t.Arc && laid;
                     return;
                 }
+                // a tank fires on the move, slowing for the shot
+                t.Trigger = ready && laid;
             }
-            else { t.WantCannonYaw = 0f; t.WantCannonPitch = -0.03f; }
+            else { t.WantCannonYaw = math.lerp(t.WantCannonYaw, 0f, 1f - math.exp(-dt)); t.WantCannonPitch = -0.03f; }
 
-            float2 goal = Map.Objectives[t.Objective];
+            float2 goal = t.Ordered ? t.OrderAt : Map.Objectives[t.Objective];
             float toGoal = math.distance(goal, t.Pos.xz);
-            float2 dir = TankWay(t.Objective, t.Pos.xz);
-            if (toGoal < 24f || !math.any(dir)) { t.Throttle = 0f; t.Steer = 0f; return; }
+            float2 dir = t.Ordered ? (t.Field >= 0 ? TankWay(TankOrderFlow, t.Field, t.Pos.xz, goal) : math.normalizesafe(goal - t.Pos.xz)) : TankWay(TankFlow, t.Objective, t.Pos.xz, goal);
+            float stop = t.Ordered ? 5f : 24f;
+            if (toGoal < stop || !math.any(dir)) { t.Throttle = 0f; t.Steer = 0f; return; }
             float turn = Wrap(math.atan2(dir.x, dir.y) - t.Yaw);
             t.Steer = math.clamp(turn * 1.8f, -1f, 1f);
-            t.Throttle = math.abs(turn) > 0.9f ? 0f : math.saturate(1.15f - math.abs(turn) * 1.1f);
+            t.Throttle = math.abs(turn) > 0.9f ? 0f : math.saturate(1.15f - math.abs(turn) * 1.1f) * math.saturate(toGoal / 12f + 0.3f);
+            if (t.HasAim && t.Kind == TankKind.Tank) t.Throttle *= 0.6f;
             if (t.Throttle > 0.2f && math.abs(t.Speed) < 0.25f) t.Stuck += dt; else t.Stuck = math.max(0f, t.Stuck - dt * 2f);
             if (t.Stuck > 1.6f) { t.Stuck = 0f; t.Backing = _rng.NextFloat(1.6f, 2.8f); t.BackSteer = _rng.NextBool() ? 0.8f : -0.8f; }
         }
 
-        float2 TankWay(int objective, float2 p)
+        float2 TankWay(NativeArray<sbyte> flow, int field, float2 p, float2 goal)
         {
             int2 c = MapView.Cell(p);
             float2 sum = 0;
@@ -417,28 +461,12 @@ namespace LSBS
             for (int x = -2; x <= 2; x++)
             {
                 int2 q = math.clamp(c + new int2(x, y), 0, new int2(MapView.W - 1, MapView.H - 1));
-                int f = TankFlow[objective * MapView.W * MapView.H + MapView.Index(q)];
+                int f = flow[field * MapView.W * MapView.H + MapView.Index(q)];
                 if (f >= 0) sum += math.normalize((float2)MapView.Dir(f));
             }
             if (math.any(sum)) return math.normalizesafe(sum);
             // inside something's margin: straight for it
-            return math.normalizesafe(Map.Objectives[objective] - p);
-        }
-
-        int TankObjective(Tank t)
-        {
-            bool attack = Orders[t.Team] == OrderAttack || Orders[t.Team] == OrderAuto && (Teams[t.Team].Attacking || (t.Crew.Count & 1) == 0);
-            int best = -1;
-            float bestScore = float.MaxValue;
-            for (int pass = 0; pass < 2 && best < 0; pass++)
-                for (int o = 0; o < Front.Count; o++)
-                {
-                    if (pass == 0 == attack ? !CanTake(o, t.Team) : !OnTheLine(o, t.Team)) continue;
-                    float score = math.distance(Map.Objectives[o], t.Pos.xz) - (o == t.Objective ? 40f : 0f);
-                    foreach (var k in Tanks) if (k != t && !k.Wreck && k.Team == t.Team && k.Objective == o) score += 45f;
-                    if (score < bestScore) { bestScore = score; best = o; }
-                }
-            return best >= 0 ? best : Front.Home(t.Team);
+            return math.normalizesafe(goal - p);
         }
 
         bool TankHits(Tank t, float2 p, float yaw)
@@ -448,16 +476,17 @@ namespace LSBS
             for (int x = -1; x <= 1; x++)
             {
                 if (x == 0 && math.abs(z) < 2) continue;
-                float2 q = s.World(new float2(x * Tank.HalfWide, z * Tank.HalfLong * 0.5f));
+                float2 q = s.World(new float2(x * (t.HalfWide - 0.4f), z * t.HalfLong * 0.5f));
                 if (math.abs(q.x) > MapView.HalfW - 2f || math.abs(q.y) > MapView.HalfH - 2f) return true;
                 int c = MapView.Index(q);
                 if (Map.Blocked[c] != 0 && Map.PropTop[c] - Map.Height(q) > 0.55f) return true;
             }
             foreach (var o in Tanks)
             {
-                if (o == t) continue;
+                if (o == t || o.Carried) continue;
                 float now = math.distancesq(o.Pos.xz, t.Pos.xz), then = math.distancesq(o.Pos.xz, p);
-                if (then < 6.6f * 6.6f && then < now) return true;
+                float r = (o.HalfLong + t.HalfLong) * 0.85f;
+                if (then < r * r && then < now) return true;
             }
             return false;
         }
@@ -467,7 +496,6 @@ namespace LSBS
             // uphill it labours, downhill it runs on a little
             if (t.Throttle == 0f && t.Steer == 0f && math.abs(t.Speed) < 0.01f && math.abs(t.Turning) < 0.002f)
             {
-                // standing
                 t.Speed = 0f; t.Turning = 0f;
                 t.Rumble = math.lerp(t.Rumble, 0f, 1f - math.exp(-3f * dt));
                 return;
@@ -492,14 +520,10 @@ namespace LSBS
             t.Rumble = math.lerp(t.Rumble, math.saturate(math.abs(t.Speed) / 3f + math.abs(t.Turning)), 1f - math.exp(-3f * dt));
         }
 
-        /// <summary>
-        /// How it sits: each track rests across the high points under it, so it bridges trenches, noses over crests and drops
-        /// its weight down the far side.
-        /// </summary>
+        /// <summary>How it sits: each track rests across the high points under it.</summary>
         void Settle(Tank t, in TankRest rest, float dt)
         {
             float y = rest.Y, pitch = rest.Pitch, roll = rest.Roll;
-            // sprung: pushed up smartly, falling under its own weight
             float gap = y - t.Pos.y;
             if (gap > 0f) { t.Pos.y += gap * (1f - math.exp(-14f * dt)); t.Fall = 0f; }
             else
@@ -522,40 +546,48 @@ namespace LSBS
 
         // ------------------------------------------------------------------ the main gun
 
-        /// <summary>Another tank before anything else; failing that, the thickest of their infantry in sight.</summary>
+        /// <summary>Another tank before anything else; failing that, the thickest of the enemy's infantry in sight.</summary>
         void PickTarget(Tank t)
         {
             t.HasAim = false;
             t.Enemy = null;
-            float3 eye = (float3)t.At(TankModel.Cannon) + new float3(0, 0.3f, 0);
+            float3 eye = (float3)t.CannonBase + new float3(0, 0.3f, 0);
             float best = T.tankRange;
             foreach (var o in Tanks)
             {
-                if (o.Wreck || o.Team == t.Team) continue;
+                if (o.Wreck || o.Carried || o.Team == t.Team) continue;
                 float d = math.distance(o.Pos, t.Pos);
                 if (d >= best || !Map.Sees(eye, o.Pos + new float3(0, 2f, 0))) continue;
                 best = d;
                 t.Enemy = o;
             }
             if (t.Enemy != null) { t.HasAim = true; t.Aim = t.Enemy.Pos + new float3(0, 1.4f, 0); return; }
+            // a destroyer's for tanks: it won't waste itself on men
+            if (t.Kind == TankKind.Destroyer) return;
 
-            var theirs = t.Team == Team.Green ? _grey : _green;
-            var mine = t.Team == Team.Green ? _green : _grey;
-            int2 lo = theirs.At(t.Pos.xz - T.tankRange), hi = theirs.At(t.Pos.xz + T.tankRange);
+            var all = _all;
+            int2 lo = all.At(t.Pos.xz - T.tankRange), hi = all.At(t.Pos.xz + T.tankRange);
             float worthBest = 3f;
             for (int y = lo.y; y <= hi.y; y++)
             for (int x = lo.x; x <= hi.x; x++)
             {
-                int k = y * theirs.W + x;
-                int count = theirs.Start[k + 1] - theirs.Start[k];
+                int k = y * all.W + x;
+                int count = 0, first = -1;
+                for (int n = all.Start[k]; n < all.Start[k + 1]; n++)
+                {
+                    int slot = all.Items[n];
+                    if (Slots[slot].Team == t.Team) continue;
+                    count++;
+                    if (first < 0) first = slot;
+                }
                 if (count < 2) continue;
-                var s = Slots[theirs.Items[theirs.Start[k]]];
+                var s = Slots[first];
                 float d = math.distance(s.Pos, t.Pos);
                 if (d < 16f || d > T.tankRange) continue;
                 float2 to = s.Pos.xz - t.Pos.xz;
                 float off = math.abs(Wrap(math.atan2(to.x, to.y) - t.Yaw));
-                float worth = count * (1.4f - d / T.tankRange) - off * 1.5f;
-                if (worth <= worthBest || mine.CountNear(Slots, s.Pos.xz, T.shellEdgeRadius * 0.8f, 1) > 0) continue;
+                float worth = count * (1.4f - d / T.tankRange) - (t.Kind == TankKind.Tank ? 0f : off * 1.5f);
+                if (worth <= worthBest || all.CountNear(Slots, s.Pos.xz, T.shellEdgeRadius * 0.8f, 1, t.Team, true) > 0) continue;
                 if (!Map.Sees(eye, s.Pos + new float3(0, 1.4f, 0))) continue;
                 worthBest = worth;
                 t.HasAim = true;
@@ -566,17 +598,14 @@ namespace LSBS
         /// <summary>Lays the gun on a place, as far as it'll go.</summary>
         public void Elevate(Tank t, float3 at)
         {
-            float3 from = t.At(TankModel.Cannon);
-            float3 d = at - from;
-            // into the tank's own frame
-            float3 dir = Arc(d);
-            Lay(t, dir);
+            float3 from = t.CannonBase;
+            Lay(t, Arc(at - from));
         }
 
         public void Lay(Tank t, float3 dir)
         {
             float3 l = Quaternion.Inverse(t.Rotation) * (Vector3)dir;
-            t.WantCannonYaw = math.clamp(math.atan2(l.x, l.z), -Tank.CannonArc, Tank.CannonArc);
+            t.WantCannonYaw = math.clamp(math.atan2(l.x, l.z), -t.Arc, t.Arc);
             t.WantCannonPitch = math.clamp(-math.atan2(l.y, math.length(l.xz)), -0.5f, 0.2f);
         }
 
@@ -608,20 +637,21 @@ namespace LSBS
         {
             t.Reload = math.max(0f, t.Reload - dt);
             t.Recoil = math.max(0f, t.Recoil - dt * 1.6f);
-            const float swing = 0.5f;
-            t.CannonYaw += math.clamp(t.WantCannonYaw - t.CannonYaw, -swing * dt, swing * dt);
-            t.CannonPitch += math.clamp(t.WantCannonPitch - t.CannonPitch, -swing * dt, swing * dt);
+            // a turret turns faster than a destroyer's mount, which hardly needs to
+            float swing = t.Kind == TankKind.Tank ? 0.9f : 0.5f;
+            float dy = t.Kind == TankKind.Tank ? Wrap(t.WantCannonYaw - t.CannonYaw) : t.WantCannonYaw - t.CannonYaw;
+            t.CannonYaw = Wrap(t.CannonYaw + math.clamp(dy, -swing * dt, swing * dt));
+            t.CannonPitch += math.clamp(t.WantCannonPitch - t.CannonPitch, -0.5f * dt, 0.5f * dt);
             if (!t.Trigger || t.Reload > 0f || t.Crew.Count == 0) return;
             t.Trigger = false;
             t.Reload = Tank.ReloadTime;
             t.Recoil = 1f;
-            // it rocks back on its tracks
             t.PitchV -= 0.5f;
             t.Speed -= 0.4f * math.cos(t.CannonYaw);
             float3 dir = t.CannonRotation * Vector3.forward;
             dir = Scattered(t, dir);
             var gunner = t.Player >= 0 && t.Seat == 0 ? (t.Player, Slots[t.Player].Gen) : t.Crew[0];
-            Shells.Add(new TankShell { Pos = t.Muzzle, Vel = dir * Tank.ShellSpeed, Life = 8f, Team = t.Team, Shooter = gunner.Item1, ShooterGen = gunner.Item2 });
+            Shells.Add(new TankShell { Pos = t.Muzzle, Vel = dir * Tank.ShellSpeed, Life = 8f, Hurt = t.Hurt, Team = t.Team, Shooter = gunner.Item1, ShooterGen = gunner.Item2 });
             Blasts.Add(new BlastEvent { At = t.Muzzle, Dir = dir, Cannon = true, Team = t.Team });
         }
 
@@ -631,19 +661,24 @@ namespace LSBS
             {
                 var s = Shells[i];
                 bool hit = false;
+                Tank struck = null;
                 for (int k = 0; k < 4 && !hit; k++)
                 {
                     float h = dt / 4f;
                     s.Vel.y -= 9.81f * h;
                     s.Pos += s.Vel * h;
                     hit = s.Pos.y < Map.Height(s.Pos.xz) || s.Pos.y < Map.PropTop[MapView.Index(s.Pos.xz)];
-                    foreach (var t in Tanks) if (!t.Wreck && t.Team != s.Team && math.distancesq(t.Pos, s.Pos) < 36f && t.Distance(s.Pos) < 0.25f) hit = true;
+                    foreach (var t in Tanks)
+                        if (!t.Wreck && !t.Carried && t.Team != s.Team && math.distancesq(t.Pos, s.Pos) < 64f && t.Distance(s.Pos) < 0.25f) { hit = true; struck = t; }
+                    // and transports, low over the field
+                    if (!hit && HitAircraft(s.Pos, s.Team, s.Hurt)) hit = true;
                 }
                 s.Life -= dt;
                 if (hit)
                 {
                     Shells.RemoveAt(i);
-                    Explode(s.Pos, T.shellFullRadius, T.shellFullDamage, T.shellEdgeRadius, T.shellEdgeDamage, s.Team, true, false, s.Shooter, s.ShooterGen);
+                    if (struck != null) HurtTank(struck, s.Hurt);
+                    Explode(s.Pos, T.shellFullRadius, T.shellFullDamage, T.shellEdgeRadius, T.shellEdgeDamage, s.Team, true, false, s.Shooter, s.ShooterGen, struck == null);
                 }
                 else if (s.Life <= 0f || math.abs(s.Pos.x) > MapView.HalfW + 20f || math.abs(s.Pos.z) > MapView.HalfH + 20f) Shells.RemoveAt(i);
                 else Shells[i] = s;
@@ -667,12 +702,12 @@ namespace LSBS
                 p += v * 0.03f;
                 if (math.abs(p.x) > MapView.HalfW || math.abs(p.z) > MapView.HalfH) break;
                 if (p.y < Map.Height(p.xz) || p.y < Map.PropTop[MapView.Index(p.xz)]) break;
-                foreach (var o in Tanks) if (o != t && !o.Wreck && math.distancesq(o.Pos, p) < 36f && o.Distance(p) < 0.2f) return p;
+                foreach (var o in Tanks) if (o != t && !o.Wreck && !o.Carried && math.distancesq(o.Pos, p) < 64f && o.Distance(p) < 0.2f) return p;
             }
             return p;
         }
 
-        // ------------------------------------------------------------------ the side guns
+        // ------------------------------------------------------------------ the machine gun
 
         void SideGun(Tank t, int side, float dt, bool manned)
         {
@@ -698,7 +733,6 @@ namespace LSBS
             if (!Bears(t, side, at, out float yaw, out float pitch)) { g.Target = -1; return; }
             g.WantYaw = yaw;
             g.WantPitch = pitch;
-            // got away out of range
             if (math.distance(foe.Pos, from) > T.maxRange * T.tankGunRange) { g.Target = -1; return; }
             if (math.abs(g.Yaw - yaw) > 0.07f) { g.Timer = math.max(g.Timer, 0.1f); return; }
             while (g.Timer <= 0f && g.Ammo > 0)
@@ -730,10 +764,10 @@ namespace LSBS
             }
         }
 
-        /// <summary>Whether a side gun can be brought to bear on a place.</summary>
+        /// <summary>Whether the machine gun can be brought to bear on a place.</summary>
         static bool Bears(Tank t, int side, float3 at, out float yaw, out float pitch)
         {
-            Vector3 l = Quaternion.Inverse(t.Rotation * Quaternion.Euler(0, side == 0 ? -90f : 90f, 0)) * ((Vector3)at - t.GunAt(side));
+            Vector3 l = Quaternion.Inverse(t.Rotation) * ((Vector3)at - t.GunAt(side));
             yaw = Mathf.Atan2(l.x, l.z);
             pitch = -Mathf.Atan2(l.y, new Vector2(l.x, l.z).magnitude);
             return Mathf.Abs(yaw) < Tank.SideArc && Mathf.Abs(pitch) < 0.4f;
@@ -741,41 +775,49 @@ namespace LSBS
 
         // ------------------------------------------------------------------ hurting, and being hurt
 
-        /// <summary>Anybody of theirs it runs onto.</summary>
+        /// <summary>Anybody of anyone else's it runs onto.</summary>
         void Crush(Tank t)
         {
             if (math.abs(t.Speed) < 1.1f) return;
-            var theirs = t.Team == Team.Green ? _grey : _green;
+            var all = _all;
             var s = t.State;
-            int2 lo = theirs.At(t.Pos.xz - 5f), hi = theirs.At(t.Pos.xz + 5f);
+            float r = t.HalfLong + 1f;
+            int2 lo = all.At(t.Pos.xz - r), hi = all.At(t.Pos.xz + r);
             for (int y = lo.y; y <= hi.y; y++)
             for (int x = lo.x; x <= hi.x; x++)
             {
-                int k = y * theirs.W + x;
-                for (int n = theirs.Start[k]; n < theirs.Start[k + 1]; n++)
+                int k = y * all.W + x;
+                for (int n = all.Start[k]; n < all.Start[k + 1]; n++)
                 {
-                    int slot = theirs.Items[n];
+                    int slot = all.Items[n];
                     var st = Slots[slot];
                     if (!st.Alive || st.Team == t.Team) continue;
                     float2 l = s.Local(st.Pos.xz);
-                    if (math.abs(l.x) > TankModel.TrackOut - 0.1f || math.abs(l.y) > TankModel.TrackZ - 0.5f) continue;
+                    if (math.abs(l.x) > t.HalfWide - 0.1f || math.abs(l.y) > t.HalfLong - 0.2f) continue;
                     var who = t.Crew.Count > 0 ? t.Crew[0] : (slot: -1, gen: 0);
                     Shots.Enqueue(new ShotEvent { Shooter = who.slot, ShooterGen = who.gen, Target = slot, TargetGen = st.Gen, From = t.Pos, To = st.Pos + new float3(0, 0.6f, 0), Damage = 400f, Hit = true, Team = t.Team, Kind = ShotKind.Tank });
                 }
             }
         }
 
+        /// <summary>A blast close by: a shell's near miss does half what a hit would, a grenade a little.</summary>
         void HurtTanks(float3 at, bool big)
         {
             for (int i = 0; i < Tanks.Count; i++)
             {
                 var t = Tanks[i];
-                if (t.Wreck || t.Distance(at) > (big ? 4.5f : 3.2f)) continue;
-                t.Health -= big ? Tank.ShellHurt : Tank.GrenadeHurt;
-                t.PitchV += _rng.NextFloat(-0.5f, 0.5f);
-                t.RollV += _rng.NextFloat(-0.5f, 0.5f);
-                if (t.Health <= 0.01f) Destroy(t);
+                if (t.Wreck || t.Carried || t.Distance(at) > (big ? 4f : 3.2f)) continue;
+                HurtTank(t, big ? Tank.ShellHurt * 0.5f : Tank.GrenadeHurt);
             }
+        }
+
+        public void HurtTank(Tank t, float hurt)
+        {
+            if (t.Wreck) return;
+            t.Health -= hurt;
+            t.PitchV += _rng.NextFloat(-0.5f, 0.5f);
+            t.RollV += _rng.NextFloat(-0.5f, 0.5f);
+            if (t.Health <= 0.01f) Destroy(t);
         }
 
         void Destroy(Tank t)
@@ -796,7 +838,7 @@ namespace LSBS
                 st.Inside = false;
                 st.Pos = t.Pos + new float3(_rng.NextFloat(-1.5f, 1.5f), 1.6f, _rng.NextFloat(-1.5f, 1.5f));
                 Slots[slot] = st;
-                Shots.Enqueue(new ShotEvent { Shooter = -1, Target = slot, TargetGen = gen, From = t.Pos, To = st.Pos, Damage = 9999f, Power = 0.75f, Hit = true, Team = (byte)(1 - t.Team), Kind = ShotKind.Blast, Big = true });
+                Shots.Enqueue(new ShotEvent { Shooter = -1, Target = slot, TargetGen = gen, From = t.Pos, To = st.Pos, Damage = 9999f, Power = 0.75f, Hit = true, Team = Team.None, Kind = ShotKind.Blast, Big = true });
             }
             t.Crew.Clear();
             t.Player = -1;

@@ -11,7 +11,7 @@ namespace LSBS
     {
         public static float Master = 0.8f, Guns = 1f, Blasts = 1f, Sensitivity = 1f, Fov = 74f, Brightness = 0f, RenderScale = 1f, Detail = 45f;
         public static int Ragdolls = 140, Shadows = 2, Antialias = 1, FpsCap = 0, Window = 0, Width, Height;
-        public static bool VSync, Grain = true, Bloom = true, Shake = true, Counter = true;
+        public static bool VSync, Grain = true, Bloom = true, Shake = true, Counter = true, EdgePan = true;
 
         public static void Load()
         {
@@ -22,7 +22,7 @@ namespace LSBS
             Window = PlayerPrefs.GetInt("lsbs.window", Screen.fullScreenMode == FullScreenMode.Windowed ? 2 : 1);
             Width = PlayerPrefs.GetInt("lsbs.w", 0); Height = PlayerPrefs.GetInt("lsbs.h", 0);
             VSync = PlayerPrefs.GetInt("lsbs.vsync", 0) == 1; Grain = PlayerPrefs.GetInt("lsbs.grain", 1) == 1; Bloom = PlayerPrefs.GetInt("lsbs.bloom", 1) == 1;
-            Shake = PlayerPrefs.GetInt("lsbs.shake", 1) == 1; Counter = PlayerPrefs.GetInt("lsbs.counter", 1) == 1;
+            Shake = PlayerPrefs.GetInt("lsbs.shake", 1) == 1; Counter = PlayerPrefs.GetInt("lsbs.counter", 1) == 1; EdgePan = PlayerPrefs.GetInt("lsbs.edgepan", 1) == 1;
         }
 
         public static void Save()
@@ -33,7 +33,7 @@ namespace LSBS
             PlayerPrefs.SetInt("lsbs.ragdolls", Ragdolls); PlayerPrefs.SetInt("lsbs.shadows", Shadows); PlayerPrefs.SetInt("lsbs.aa", Antialias); PlayerPrefs.SetInt("lsbs.cap", FpsCap);
             PlayerPrefs.SetInt("lsbs.window", Window); PlayerPrefs.SetInt("lsbs.w", Width); PlayerPrefs.SetInt("lsbs.h", Height);
             PlayerPrefs.SetInt("lsbs.vsync", VSync ? 1 : 0); PlayerPrefs.SetInt("lsbs.grain", Grain ? 1 : 0); PlayerPrefs.SetInt("lsbs.bloom", Bloom ? 1 : 0);
-            PlayerPrefs.SetInt("lsbs.shake", Shake ? 1 : 0); PlayerPrefs.SetInt("lsbs.counter", Counter ? 1 : 0);
+            PlayerPrefs.SetInt("lsbs.shake", Shake ? 1 : 0); PlayerPrefs.SetInt("lsbs.counter", Counter ? 1 : 0); PlayerPrefs.SetInt("lsbs.edgepan", EdgePan ? 1 : 0);
             PlayerPrefs.Save();
         }
     }
@@ -57,7 +57,9 @@ namespace LSBS
         int _tab;
         public Page Now { get; private set; }
         public bool Open => Now != Page.None;
-        int _green = 500, _grey = 500, _wave = 100;
+        int _teams = 4, _mine;
+        bool _squads = true, _tanks = true, _destroyers = true;
+        Buy _first = new() { Squads = 60, Tanks = 2, Destroyers = 2 }, _wave = new() { Squads = 30, Tanks = 1, Destroyers = 1 };
         GUIStyle _title, _head, _text, _value, _button, _on, _field;
 
         public GameMenu(Battle b, Camera cam, UniversalRenderPipelineAsset pipe, VolumeProfile look)
@@ -72,9 +74,10 @@ namespace LSBS
             if (_sizes.Count == 0) _sizes.Add(new Vector2Int(Screen.width, Screen.height));
             _size = _sizes.IndexOf(new Vector2Int(Options.Width > 0 ? Options.Width : Screen.width, Options.Height > 0 ? Options.Height : Screen.height));
             if (_size < 0) _size = _sizes.Count - 1;
-            _green = PlayerPrefs.GetInt("lsbs.green", 500);
-            _grey = PlayerPrefs.GetInt("lsbs.grey", 500);
-            _wave = PlayerPrefs.GetInt("lsbs.wave", 100);
+            _teams = PlayerPrefs.GetInt("lsbs.teams", 4); _mine = PlayerPrefs.GetInt("lsbs.mine", 0);
+            _squads = PlayerPrefs.GetInt("lsbs.allowSquads", 1) == 1; _tanks = PlayerPrefs.GetInt("lsbs.allowTanks", 1) == 1; _destroyers = PlayerPrefs.GetInt("lsbs.allowDestroyers", 1) == 1;
+            _first = new Buy { Squads = PlayerPrefs.GetInt("lsbs.firstSquads", 60), Tanks = PlayerPrefs.GetInt("lsbs.firstTanks", 2), Destroyers = PlayerPrefs.GetInt("lsbs.firstDestroyers", 2) };
+            _wave = new Buy { Squads = PlayerPrefs.GetInt("lsbs.waveSquads", 30), Tanks = PlayerPrefs.GetInt("lsbs.waveTanks", 1), Destroyers = PlayerPrefs.GetInt("lsbs.waveDestroyers", 1) };
             Apply();
             if (Options.Width > 0) ApplyWindow();
         }
@@ -242,27 +245,77 @@ namespace LSBS
             return r;
         }
 
+        /// <summary>A count with a minus and a plus, and what it'll cost.</summary>
+        int Count(string label, int v, int cost, int budgetLeft, bool allowed)
+        {
+            GUI.Label(new Rect(_x, _y, _w - 200, 30), label + (allowed ? $"   ({cost} G)" : "   (not allowed)"), _text);
+            if (Button(new Rect(_x + _w - 190, _y, 40, 30), "-") && v > 0) v--;
+            GUI.Label(new Rect(_x + _w - 146, _y, 60, 30), v.ToString(), _on);
+            if (Button(new Rect(_x + _w - 82, _y, 40, 30), "+") && allowed && cost <= budgetLeft) v++;
+            if (Button(new Rect(_x + _w - 40, _y, 40, 30), "++") && allowed) v += Mathf.Max(0, Mathf.Min(10, budgetLeft / Mathf.Max(1, cost)));
+            _y += 38;
+            return allowed ? v : 0;
+        }
+
+        /// <summary>What a side brings: squads, tanks, destroyers, each with the transport it comes in, within so much gold.</summary>
+        Buy Buying(string title, Buy b, int gold)
+        {
+            var t = _b.tuning;
+            GUI.Label(new Rect(_x, _y, _w, 28), $"{title}   {b.Cost(t)} / {gold} G", _head);
+            _y += 34;
+            b.Squads = Count("Squads of 10", b.Squads, t.squadCost, gold - b.Cost(t), _squads);
+            b.Tanks = Count("Tanks", b.Tanks, t.tankCost, gold - b.Cost(t), _tanks);
+            b.Destroyers = Count("Tank destroyers", b.Destroyers, t.destroyerCost, gold - b.Cost(t), _destroyers);
+            // never over what there is to spend
+            while (b.Cost(t) > gold && b.Squads > 0) b.Squads--;
+            while (b.Cost(t) > gold && b.Tanks > 0) b.Tanks--;
+            while (b.Cost(t) > gold && b.Destroyers > 0) b.Destroyers--;
+            _y += 8;
+            return b;
+        }
+
         void Main(float w, float h)
         {
-            GUI.Label(new Rect(0, h * 0.5f - 330, w, 80), "L.S.B.S", _title);
-            Box(w, h, 520, 500);
-            _green = Number("Greens", _green, 1, 12000);
-            _grey = Number("Greys", _grey, 1, 12000);
-            _wave = Number("Reinforcements a wave", _wave, 0, 5000);
-            _b.tuning.waveInterval = Number("Seconds between waves", Mathf.RoundToInt(_b.tuning.waveInterval), 5, 600);
+            GUI.Label(new Rect(0, h * 0.5f - 380, w, 80), "L.S.B.S", _title);
+            var box = Box(w, h, 920, 560);
+            float left = _x, colW = (_w - 40) * 0.5f;
+            // ---- the game ----
+            _w = colW;
+            GUI.Label(new Rect(_x, _y, _w, 28), "Practice", _head);
+            _y += 38;
+            var teamNames = new string[Team.Max - 1];
+            for (int i = 0; i < teamNames.Length; i++) teamNames[i] = (i + 2) + " sides";
+            _teams = Choice("Sides", _teams - 2, teamNames) + 2;
+            _mine = Mathf.Min(Choice("You play", _mine, Team.Names), _teams - 1);
+            Fill(new Rect(_x + 130, _y - 30, 14, 14), Team.Colour(_mine));
             _y += 8;
-            if (Button(new Rect(_x, _y, _w, 54), "Begin"))
+            GUI.Label(new Rect(_x, _y, _w, 28), "Allowed", _head);
+            _y += 34;
+            _squads = Toggle("Infantry squads", _squads);
+            _tanks = Toggle("Tanks", _tanks);
+            _destroyers = Toggle("Tank destroyers", _destroyers);
+            GUI.Label(new Rect(_x, _y, _w, 48), $"Hold the objective {_b.tuning.holdToWin / 60f:0} minutes in all to win.\nReinforcements every {_b.tuning.waveInterval / 60f:0} minutes.", _text);
+            // ---- what you bring ----
+            _x = left + colW + 40; _y = box.y + 28;
+            _first = Buying("Your army", _first, _b.tuning.startGold);
+            _wave = Buying("Each wave", _wave, _b.tuning.waveGold);
+            // ---- go ----
+            _x = left; _w = colW * 2 + 40; _y = box.yMax - 70;
+            if (Button(new Rect(_x, _y, _w * 0.5f, 48), "Begin"))
             {
-                PlayerPrefs.SetInt("lsbs.green", _green); PlayerPrefs.SetInt("lsbs.grey", _grey); PlayerPrefs.SetInt("lsbs.wave", _wave);
-                _b.tuning.waveSize = _wave;
+                PlayerPrefs.SetInt("lsbs.teams", _teams); PlayerPrefs.SetInt("lsbs.mine", _mine);
+                PlayerPrefs.SetInt("lsbs.allowSquads", _squads ? 1 : 0); PlayerPrefs.SetInt("lsbs.allowTanks", _tanks ? 1 : 0); PlayerPrefs.SetInt("lsbs.allowDestroyers", _destroyers ? 1 : 0);
+                PlayerPrefs.SetInt("lsbs.firstSquads", _first.Squads); PlayerPrefs.SetInt("lsbs.firstTanks", _first.Tanks); PlayerPrefs.SetInt("lsbs.firstDestroyers", _first.Destroyers);
+                PlayerPrefs.SetInt("lsbs.waveSquads", _wave.Squads); PlayerPrefs.SetInt("lsbs.waveTanks", _wave.Tanks); PlayerPrefs.SetInt("lsbs.waveDestroyers", _wave.Destroyers);
+                var g = new GameSetup { Teams = _teams, Player = (byte)_mine, Seed = (uint)Random.Range(1, int.MaxValue), Squads = _squads, Tanks = _tanks, Destroyers = _destroyers };
+                g.First[_mine] = g.Allowed(_first);
+                g.Wave[_mine] = g.Allowed(_wave);
+                g.PickForComputer(_b.tuning);
                 Show(Page.None);
-                _b.Begin(_green, _grey);
+                _b.Begin(g);
             }
-            _y += 66;
-            if (Button(new Rect(_x, _y, _w * 0.48f, 42), "New field")) _b.NewField();
-            if (Button(new Rect(_x + _w * 0.52f, _y, _w * 0.48f, 42), "Settings")) { _back = Page.Main; Show(Page.Settings); }
-            _y += 54;
-            if (Button(new Rect(_x, _y, _w, 42), "Quit")) Quit();
+            if (Button(new Rect(_x + _w * 0.52f, _y, _w * 0.23f, 48), "Settings")) { _back = Page.Main; Show(Page.Settings); }
+            if (Button(new Rect(_x + _w * 0.77f, _y, _w * 0.23f, 48), "Quit")) Quit();
         }
 
         void Pause(float w, float h)

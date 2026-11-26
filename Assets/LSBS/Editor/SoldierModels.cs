@@ -36,7 +36,7 @@ namespace LSBS.EditorTools
         {
             var o = new Dictionary<string, MeshBuilder>();
             MeshBuilder G(string group) => o.TryGetValue(group, out var mb) ? mb : o[group] = new MeshBuilder();
-            if (team == Team.Green) Green(G, f); else Grey(G, f);
+            if (team == 0) Green(G, f); else Grey(G, f);
             Radio(G("Back (communicator)"), f, team);
             Gunner(G, f, team);
             // the leader's strip

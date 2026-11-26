@@ -5,13 +5,17 @@ using Unity.Mathematics;
 
 namespace LSBS
 {
-    /// <summary>What soldiers know about the ground. One-metre cells; x runs from the greens (-) to the greys (+).</summary>
+    /// <summary>What soldiers know about the ground. One-metre cells, the objective in the middle.</summary>
     public struct MapView
     {
-        public const int W = 480, H = 256;
+        public const int W = 400, H = 400;
         public const float HalfW = W * 0.5f, HalfH = H * 0.5f;
-        /// <summary>Cover bits: shelters from enemies further along +x (useful to greens), or -x (useful to greys).</summary>
-        public const byte FromPlusX = 1, FromMinusX = 2, Roofed = 4;
+        /// <summary>Cover bits: shelters from enemies further along +x, -x, +z or -z; or a roof overhead.</summary>
+        public const byte FromPlusX = 1, FromMinusX = 2, Roofed = 4, FromPlusZ = 8, FromMinusZ = 16;
+
+        /// <summary>The cover bit that shelters from something that way.</summary>
+        public static byte CoverFrom(float2 threat) =>
+            math.abs(threat.x) >= math.abs(threat.y) ? (threat.x >= 0f ? FromPlusX : FromMinusX) : (threat.y >= 0f ? FromPlusZ : FromMinusZ);
 
         [ReadOnly] public NativeArray<float> Ground;   // (W+1)*(H+1)
         [ReadOnly] public NativeArray<float> PropTop;  // W*H, very low where empty
@@ -146,14 +150,19 @@ namespace LSBS
         }
 
         /// <summary>The same for just this cell: never into anything.</summary>
-        public float2 FlowHere(int objective, float2 p)
+        public float2 FlowHere(int objective, float2 p) => FlowHere(Flow, objective, p);
+
+        /// <summary>The way to walk toward an objective from here.</summary>
+        public float2 FlowDir(int objective, float2 p) => FlowDir(Flow, objective, p);
+
+        /// <summary>The same, in any set of fields laid end to end (W*H each).</summary>
+        public static float2 FlowHere(in NativeArray<sbyte> flow, int field, float2 p)
         {
-            int f = Flow[objective * W * H + Index(p)];
+            int f = flow[field * W * H + Index(p)];
             return f >= 0 ? math.normalize((float2)Dir(f)) : float2.zero;
         }
 
-        /// <summary>The way to walk toward an objective from here.</summary>
-        public float2 FlowDir(int objective, float2 p)
+        public static float2 FlowDir(in NativeArray<sbyte> flow, int field, float2 p)
         {
             int2 c = Cell(p);
             float2 sum = 0;
@@ -161,7 +170,7 @@ namespace LSBS
             for (int x = -1; x <= 1; x++)
             {
                 int2 q = math.clamp(c + new int2(x, y), 0, new int2(W - 1, H - 1));
-                int f = Flow[objective * W * H + Index(q)];
+                int f = flow[field * W * H + Index(q)];
                 if (f >= 0) sum += math.normalize((float2)Dir(f));
             }
             return math.normalizesafe(sum);

@@ -23,6 +23,8 @@ namespace LSBS
         public const int Captain = 1, NoHead = 2, Mine = 4, Sweeper = 8, Communicator = 16, Carrying = 32, Gunner = 64, HandsOff = 128;
 
         public static int ClassFlag(SoldierClass c) => c == SoldierClass.Sweeper ? Sweeper : c == SoldierClass.Communicator ? Communicator : c == SoldierClass.Gunner ? Gunner : 0;
+        /// <summary>Which side, in bits 8 to 10: the shader colours the kit by it.</summary>
+        public static int TeamFlag(int team) => (team & 7) << 8;
     }
 
     public struct ClipTable
@@ -67,7 +69,7 @@ namespace LSBS
             if (!seen && !shadow) return;
 
             uint2 fa = Frame(a.Clip, a.Time, out float ta), fb = Frame(a.Prev, a.PrevTime, out float tb);
-            int flags = SoldierInstance.ClassFlag(s.Class);
+            int flags = SoldierInstance.ClassFlag(s.Class) | SoldierInstance.TeamFlag(s.Team);
             if (ability.Carrying && ability.Act != Act.Setup) flags |= SoldierInstance.Carrying;
             if (a.Clip >= Clip.MaximStand) flags |= SoldierInstance.HandsOff;
             if (Squads[s.Squad].Captain == s.Member) flags |= SoldierInstance.Captain;
@@ -82,13 +84,13 @@ namespace LSBS
             if (seen)
             {
                 bool near = d2 < NearSq;
-                if (s.Team == 0) { if (near) Near0.AddNoResize(inst); else Far0.AddNoResize(inst); }
-                else { if (near) Near1.AddNoResize(inst); else Far1.AddNoResize(inst); }
+                // everybody wears the one kit; their side's colour goes on in the shader
+                if (near) Near1.AddNoResize(inst); else Far1.AddNoResize(inst);
             }
             if (shadow)
             {
                 inst.Misc.y = flags & ~SoldierInstance.NoHead;
-                if (s.Team == 0) Shadow0.AddNoResize(inst); else Shadow1.AddNoResize(inst);
+                Shadow1.AddNoResize(inst);
             }
         }
     }
@@ -161,6 +163,9 @@ namespace LSBS
             material.SetInt("_HeadBone", data.Bone("Bone.001"));
             material.SetInt("_HelmetBone", data.Helmet);
             material.SetVector("_ChestPivot", data.chestPivot);
+            var colours = new Vector4[Team.Max];
+            for (int t = 0; t < Team.Max; t++) colours[t] = Team.Colour(t).linear;
+            material.SetVectorArray("_TeamColours", colours);
             _clips = new NativeArray<ClipTable>(data.clips.Length, Allocator.Persistent);
             for (int i = 0; i < data.clips.Length; i++) _clips[i] = new ClipTable { Start = data.clips[i].start, Frames = data.clips[i].frames, Loop = data.clips[i].loop };
             _planes = new NativeArray<float4>(6, Allocator.Persistent);

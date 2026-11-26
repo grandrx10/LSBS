@@ -32,9 +32,13 @@ namespace LSBS
         public SoldierClass Class { get; private set; }
         float _height = 1f;
 
+        /// <summary>The commander's view, while not inside anybody.</summary>
+        public readonly CommandView Rts;
+
         public PlayerControl(Battle b, Camera cam)
         {
             _b = b; _cam = cam;
+            Rts = new CommandView(b, cam);
             _pos = new Vector3(-70f, 26f, -60f);
             _yaw = 55f; _pitch = 18f;
         }
@@ -53,12 +57,6 @@ namespace LSBS
         public void Before(float dt)
         {
             if (Now == Mode.Soldier && !Alive) Leave(true);
-            if (Sim.PlayerDeployedSlot >= 0)
-            {
-                int s = Sim.PlayerDeployedSlot;
-                Sim.PlayerDeployedSlot = -1;
-                if (Sim.Slots[s].Alive) { if (Now == Mode.Soldier) Leave(false); Take(s); }
-            }
             var kb = Keyboard.current;
             var mouse = Mouse.current;
             if (kb == null || mouse == null) return;
@@ -74,7 +72,8 @@ namespace LSBS
             if (_menuWas) { _menuWas = false; _look = true; return; }
             if (mouse.leftButton.wasPressedThisFrame && !_look && !_b.PanelHasMouse) _look = true;
             bool menu = _b.PanelOpen;
-            bool locked = _look && !menu;
+            // the commander's view keeps the pointer; only someone being played looks with the mouse
+            bool locked = _look && !menu && Now != Mode.Spectate;
             Cursor.lockState = locked ? CursorLockMode.Locked : CursorLockMode.None;
             Cursor.visible = !locked;
             if (locked)
@@ -88,9 +87,6 @@ namespace LSBS
             HurtFlash = Mathf.Max(0f, HurtFlash - dt * 1.4f);
             _kick = Mathf.Lerp(_kick, 0f, 1f - Mathf.Exp(-9f * dt));
 
-            if (InTankNow) { }
-            else if (kb.digit1Key.wasPressedThisFrame) Sim.PlayerDeploy = Sim.PlayerDeploy == Team.Green ? -1 : Team.Green;
-            if (!InTankNow && kb.digit2Key.wasPressedThisFrame) Sim.PlayerDeploy = Sim.PlayerDeploy == Team.Grey ? -1 : Team.Grey;
 
             if (Now == Mode.Dead) Dead(dt, kb);
             else if (Now == Mode.Spectate) Spectate(dt, kb, mouse);
@@ -98,6 +94,25 @@ namespace LSBS
         }
 
         void Spectate(float dt, Keyboard kb, Mouse mouse)
+        {
+            if (Bench.Asked) { Fly(dt, kb, mouse); return; }
+            Rts.Update(dt, kb, mouse, out _pos, out _yaw, out _pitch);
+            AimedSlot = -1;
+            AimedTank = -1;
+            if (!kb.fKey.wasPressedThisFrame) return;
+            // into whoever's under the pointer, or else the captain of the first squad picked
+            int take = Rts.Hover >= 0 && Sim.Slots[Rts.Hover].Team == Rts.Team ? Rts.Hover : -1;
+            if (take < 0 && Rts.Vehicles.Count > 0 && Rts.Vehicles[0].Crew.Count > 0) take = Rts.Vehicles[0].Crew[0].slot;
+            if (take < 0 && Rts.Selected.Count > 0)
+            {
+                var q = Sim.Squads[Rts.Selected[0]];
+                if (q.Alive > 0 && q.Captain >= 0) take = q.Members[q.Captain];
+            }
+            if (take >= 0 && Sim.Slots[take].Alive) Take(take);
+        }
+
+        /// <summary>The old free-flying camera, kept for pictures and measuring.</summary>
+        void Fly(float dt, Keyboard kb, Mouse mouse)
         {
             Vector3 move = Vector3.zero;
             var rot = Quaternion.Euler(_pitch, _yaw, 0);
@@ -204,6 +219,7 @@ namespace LSBS
             }
             Sim.PlayerSquad = -1;
             _pos = _cam.transform.position + Vector3.up * (died ? 0.6f : 1.2f);
+            Rts.LookAt(new Vector3(_pos.x, Sim.Map.Height(new float2(_pos.x, _pos.z)), _pos.z), _yaw);
             Slot = -1;
             AimedSlot = -1;
             Now = Mode.Spectate;
@@ -313,7 +329,7 @@ namespace LSBS
             if (kb.rKey.wasPressedThisFrame && !busy && gun.Phase == GunPhase.Ready && gun.Ammo < Gun.Magazine(Class))
             {
                 gun.Phase = GunPhase.Reloading;
-                gun.Timer = Class == SoldierClass.Gunner ? 1.5f : 0.5f * (Gun.Magazine(Class) - gun.Ammo);
+                gun.Timer = Class == SoldierClass.Sweeper ? 0.5f * (Gun.Magazine(Class) - gun.Ammo) : Gun.ReloadTime(Class);
             }
             // a machine gun to hand, then grenades, calling the guns, setting one up
             NearMaxim = busy ? -1 : Sim.FreeMaxim(p, Sim.Slots[Slot].Team, 2.2f);
@@ -358,6 +374,14 @@ namespace LSBS
                     ability.At = LookedAt(36f, 30f);
                     busy = true;
                 }
+                if (Class == SoldierClass.Launcher && kb.eKey.wasPressedThisFrame && ability.Missiles > 0 && ability.Cooldown <= 0f)
+                {
+                    // locked on to something in the air, it follows it; otherwise it goes where it's pointed
+                    int air = LockOn();
+                    ability.Act = Act.Launch; ability.Timer = 0f; ability.Done = false; ability.Target = air;
+                    ability.At = air >= 0 ? Sim.Flights[air - Sim.Tanks.Count].Pos : LookedAt(Sim.T.missileRange * 2f, Sim.T.missileRange * 2f);
+                    busy = true;
+                }
                 if (Class == SoldierClass.Communicator && kb.eKey.wasPressedThisFrame && CanCall)
                 {
                     float3 at = LookedAt(Sim.T.callRange, -1f);
@@ -377,7 +401,8 @@ namespace LSBS
                     }
                 }
             }
-            if (_look && !busy && mouse.leftButton.wasPressedThisFrame && gun.Phase == GunPhase.Ready)
+            bool trigger = Gun.Automatic(Class) ? mouse.leftButton.isPressed : mouse.leftButton.wasPressedThisFrame;
+            if (_look && !busy && trigger && gun.Phase == GunPhase.Ready)
             {
                 if (gun.Ammo > 0)
                 {
@@ -397,6 +422,31 @@ namespace LSBS
         }
 
         static bool busyHands(in Ability a) => a.Act == Act.Setup || a.Act == Act.Pack;
+
+        /// <summary>
+        /// The enemy transport nearest the middle of the view, in range and in sight, for a missile to follow: as an index
+        /// past the tanks (missiles only follow what's in the air), or -1.
+        /// </summary>
+        public int LockOn()
+        {
+            if (Slot < 0) return -1;
+            Vector3 from = _cam.transform.position, dir = Quaternion.Euler(_pitch, _yaw, 0) * Vector3.forward;
+            byte team = Sim.Slots[Slot].Team;
+            int best = -1;
+            float bestCos = Mathf.Cos(10f * Mathf.Deg2Rad);
+            for (int i = 0; i < Sim.Flights.Count; i++)
+            {
+                var a = Sim.Flights[i];
+                if (!a.Flying || a.Team == team) continue;
+                Vector3 to = (Vector3)a.Pos - from;
+                float len = to.magnitude;
+                if (len > Sim.T.missileRange || len < 8f) continue;
+                float c = Vector3.Dot(to / len, dir);
+                if (c < bestCos || !Sim.Map.Sees(from, a.Pos)) continue;
+                bestCos = c; best = Sim.Tanks.Count + i;
+            }
+            return best;
+        }
 
         /// <summary>A machine gun in reach with nobody on it, or -1; how far through setting one up (-1 not at it).</summary>
         public int NearMaxim = -1;
@@ -437,13 +487,13 @@ namespace LSBS
             int seat = t.Seat;
             if (kb.digit1Key.wasPressedThisFrame) seat = 0;
             if (kb.digit2Key.wasPressedThisFrame) seat = 1;
-            if (kb.digit3Key.wasPressedThisFrame) seat = 2;
+            if (seat > t.GunCount) seat = t.Seat;
             if (seat != t.Seat)
             {
                 t.Seat = seat;
                 t.Throttle = t.Steer = 0f;
                 t.Trigger = false;
-                _yaw = t.Yaw * Mathf.Rad2Deg + (seat == 1 ? -90f : seat == 2 ? 90f : 0f);
+                _yaw = t.Yaw * Mathf.Rad2Deg;
                 _pitch = seat == 0 ? 8f : 0f;
             }
             _tankYaw = t.Yaw;
@@ -465,11 +515,11 @@ namespace LSBS
                 int side = t.Seat - 1;
                 var g = t.Guns[side];
                 // no further than the gun goes
-                float off = Mathf.DeltaAngle(t.Yaw * Mathf.Rad2Deg + (side == 0 ? -90f : 90f), _yaw);
+                float off = Mathf.DeltaAngle(t.Yaw * Mathf.Rad2Deg, _yaw);
                 float most = Tank.SideArc * Mathf.Rad2Deg;
                 _yaw += Mathf.Clamp(off, -most, most) - off;
                 _pitch = Mathf.Clamp(_pitch, -19f, 16f);
-                Vector3 l = Quaternion.Inverse(t.Rotation * Quaternion.Euler(0, side == 0 ? -90f : 90f, 0)) * (Quaternion.Euler(_pitch, _yaw, 0) * Vector3.forward);
+                Vector3 l = Quaternion.Inverse(t.Rotation) * (Quaternion.Euler(_pitch, _yaw, 0) * Vector3.forward);
                 g.Yaw = g.WantYaw = Mathf.Clamp(Mathf.Atan2(l.x, l.z), -Tank.SideArc, Tank.SideArc);
                 g.Pitch = g.WantPitch = Mathf.Clamp(-Mathf.Atan2(l.y, new Vector2(l.x, l.z).magnitude), -0.35f, 0.3f);
                 _mg -= dt;
@@ -596,7 +646,7 @@ namespace LSBS
             float spread = Nerf * (kind == ShotKind.Shotgun ? 0.045f : (Aiming ? 0.0008f : 0.014f) + moving * (Aiming ? 0.0015f : 0.004f));
             Fire(kind, aim, _cam.transform.position + aim * new Vector3(0.1f, -0.1f, kind == ShotKind.Pistol ? 1.0f : 1.3f), spread);
             _kick = kind == ShotKind.Pistol ? 0.6f : 1f;
-            _pitch -= kind == ShotKind.Shotgun ? 3f : kind == ShotKind.Pistol ? 1.6f : 2.2f;
+            _pitch -= kind == ShotKind.Shotgun ? 3f : kind == ShotKind.Pistol ? 1.6f : Gun.Automatic(Class) ? 0.6f : 2.2f;
             _yaw += UnityEngine.Random.Range(-0.4f, 0.4f);
         }
 
@@ -688,7 +738,7 @@ namespace LSBS
                 {
                     // straight from the mouse: nothing follows on behind
                     rot = Quaternion.Euler(_pitch, _yaw, 0);
-                    at = mine.GunAt(mine.Seat - 1) + mine.Rotation * new Vector3(mine.Seat == 1 ? -0.42f : 0.42f, 0.5f, 0f) + rot * new Vector3(0f, 0f, -0.1f);
+                    at = mine.GunAt(mine.Seat - 1) + mine.Rotation * new Vector3(0f, 0.5f, -0.6f) + rot * new Vector3(0f, 0f, -0.1f);
                 }
                 _cam.nearClipPlane = mine.Seat == 0 ? 0.3f : 0.12f;
             }

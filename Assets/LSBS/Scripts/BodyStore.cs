@@ -134,7 +134,7 @@ namespace LSBS
             _corpses[c] = new Corpse
             {
                 used = true, team = e.Team, seed = math.frac(e.Slot * 0.61803f + e.Gen * 0.37f), height = e.Height, pos = pos, at = e.Pos, yaw = e.Yaw,
-                flags = SoldierInstance.ClassFlag(e.Class) | (e.Carrying ? SoldierInstance.Carrying : 0) | (e.Captain ? SoldierInstance.Captain : 0), clip = facing < 0.2f ? Clip.DieBack : Clip.DieForward,
+                flags = SoldierInstance.ClassFlag(e.Class) | (e.Carrying ? SoldierInstance.Carrying : 0) | (e.Captain ? SoldierInstance.Captain : 0) | SoldierInstance.TeamFlag(e.Team), clip = facing < 0.2f ? Clip.DieBack : Clip.DieForward,
             };
 
             _eye = camera;
@@ -437,7 +437,8 @@ namespace LSBS
                     inst.Frames = new uint4((uint)f, (uint)next, (uint)f, (uint)next);
                     inst.Blends.x = t;
                 }
-                var l = c.team == 0 ? green : grey;
+                // one kit for everybody now: the colour's in the flags
+                var l = grey;
                 if (seen)
                 {
                     if (c.torn) l.Torn.Add(inst);

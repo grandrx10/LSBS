@@ -3,20 +3,15 @@ using Unity.Mathematics;
 
 namespace LSBS
 {
-    public enum SoldierClass : byte { Infantry, Sweeper, Communicator, Gunner }
+    public enum SoldierClass : byte { Infantry, Sweeper, Communicator, Gunner, Launcher }
 
-    /// <summary>The nine objectives: a base at each end, and rows of two, three and two between.</summary>
+    /// <summary>The places that matter: the objective in the middle, then each side's landing ground.</summary>
     public static class Front
     {
-        public const int Count = 9, GreenBase = 0, GreyBase = 8, Centre = 4;
-        public static readonly int[] Row = { 0, 1, 1, 2, 2, 2, 3, 3, 4 };
-        /// <summary>What leads on to what. A side can only take an objective next to one it already holds.</summary>
-        public static readonly int[][] Next =
-        {
-            new[] { 1, 2 }, new[] { 0, 3, 4 }, new[] { 0, 4, 5 }, new[] { 1, 6 }, new[] { 1, 2, 6, 7 }, new[] { 2, 7 },
-            new[] { 3, 4, 8 }, new[] { 4, 5, 8 }, new[] { 6, 7 },
-        };
-        public static int Home(int team) => team == Team.Green ? GreenBase : GreyBase;
+        public const int Centre = 0;
+        /// <summary>One more than the number of sides; set when the field is made.</summary>
+        public static int Count = 3;
+        public static int Home(int team) => 1 + team;
     }
 
     /// <summary>Who a soldier is. Slot is their stable row in the shared arrays; Gen tells one occupant of a slot from the next.</summary>
@@ -73,13 +68,16 @@ namespace LSBS
         public float Stuck;
     }
 
-    public enum Act : byte { None, Throw, Call, Setup, Pack }
+    public enum Act : byte { None, Throw, Call, Setup, Pack, Launch }
 
     /// <summary>A class's own business: grenades, and calling the guns.</summary>
     public struct Ability : IComponentData
     {
-        public const float ThrowTime = 0.9f, ReleaseAt = 0.45f, CallTime = 2.6f;
+        public const float ThrowTime = 0.9f, ReleaseAt = 0.45f, CallTime = 2.6f, LaunchTime = 1.6f, LaunchAt = 1.0f;
         public int Grenades;
+        /// <summary>Missile launchers: how many they've left, and which vehicle (index into the tanks this frame) they're putting one into.</summary>
+        public int Missiles;
+        public int Target;
         public float Cooldown;
         public Act Act;
         public float Timer;      // counts up
@@ -95,7 +93,7 @@ namespace LSBS
         public float Yaw;        // which way it's to face
         public bool Tall;
 
-        public static float Length(Act a) => a == Act.Throw ? ThrowTime : a == Act.Call ? CallTime : a == Act.Setup ? LSBS.Maxim.SetUp : LSBS.Maxim.PackUp;
+        public static float Length(Act a) => a == Act.Throw ? ThrowTime : a == Act.Call ? CallTime : a == Act.Launch ? LaunchTime : a == Act.Setup ? LSBS.Maxim.SetUp : LSBS.Maxim.PackUp;
     }
 
     public enum GunPhase : byte { Ready, Firing, Reloading }
@@ -105,11 +103,16 @@ namespace LSBS
         public GunPhase Phase;
         public float Timer;
         public int Ammo;
+        /// <summary>Who the last round went at (slot, or -1): staying on them needs no fresh aim.</summary>
+        public int AimedAt;
 
-        // Sebastion: 0.2 s, then 0.4 s of lever. Rachmaninoff: 0.1 s, then 0.3 s of pump. Half a second a round to reload.
-        public static float FireTime(SoldierClass c) => c == SoldierClass.Sweeper ? 0.4f : c == SoldierClass.Gunner ? 0.2f : 0.6f;
-        public static int Magazine(SoldierClass c) => c == SoldierClass.Sweeper ? 5 : c == SoldierClass.Gunner ? 8 : 4;
-        public static float ReloadTime(SoldierClass c) => c == SoldierClass.Gunner ? 1.5f : 0.5f * Magazine(c);
+        // LR-15: automatic, 500 rounds a minute, twenty to a magazine. Rachmaninoff: 0.1 s, then 0.3 s of pump, half a second a shell to reload.
+        public const float RifleRpm = 500f;
+        public static float FireTime(SoldierClass c) => c == SoldierClass.Sweeper ? 0.4f : c == SoldierClass.Gunner ? 0.2f : 60f / RifleRpm;
+        public static int Magazine(SoldierClass c) => c == SoldierClass.Sweeper ? 5 : c == SoldierClass.Gunner ? 8 : 20;
+        public static float ReloadTime(SoldierClass c) => c == SoldierClass.Gunner ? 1.5f : Automatic(c) ? 2.2f : 0.5f * Magazine(c);
+        /// <summary>Fires for as long as the trigger's held, rather than a round a click.</summary>
+        public static bool Automatic(SoldierClass c) => c == SoldierClass.Infantry || c == SoldierClass.Launcher;
     }
 
     public struct Anim : IComponentData
@@ -160,7 +163,27 @@ namespace LSBS
         public bool PlayerLed;
         public bool PlayerHold;
         public bool Crew;               // of a tank
+        /// <summary>Aboard a transport, out of the fight till it lands.</summary>
+        public bool Inside;
         public Random Rng;
+        /// <summary>The commander has told them where to go; they find their own way there and fight what they meet.</summary>
+        public bool Ordered;
+        public float2 OrderAt;
+        /// <summary>Where the group they were sent with is going; their flow field leads there.</summary>
+        public float2 OrderVia;
+        /// <summary>Which of the order flow fields leads there.</summary>
+        public int Field;
+
+        /// <summary>Seven riflemen, a missile launcher and two sweepers, always in the same places.</summary>
+        public static SoldierClass ClassOf(int member) => member >= Size - 2 ? SoldierClass.Sweeper : member == Size - 3 ? SoldierClass.Launcher : SoldierClass.Infantry;
+    }
+
+    /// <summary>An order from a commander, applied at the start of a step (so it can one day travel over the network).</summary>
+    public struct OrderCommand
+    {
+        public int Squad;
+        public float2 At, Via;
+        public byte Team;
     }
 
     public struct TeamState
@@ -205,6 +228,19 @@ namespace LSBS
         public float Seed;
         public int Killer, KillerGen;
         public byte KillerTeam;
+    }
+
+    /// <summary>A missile leaving its launcher, after a vehicle.</summary>
+    public struct Launch
+    {
+        public float3 From;
+        /// <summary>The vehicle (a tank below the tank count, else a transport), or -1 to fly straight along Dir.</summary>
+        public int Tank;
+        public float3 Dir;
+        /// <summary>Fired by the person playing, looking along it: steadier than the AI's reckoning.</summary>
+        public bool Aimed;
+        public byte Team;
+        public int Shooter, ShooterGen;
     }
 
     public struct Throw

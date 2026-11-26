@@ -3,7 +3,19 @@ using UnityEngine;
 
 namespace LSBS
 {
-    public static class Team { public const byte Green = 0, Grey = 1; }
+    /// <summary>Up to eight sides, each with a colour. The person playing commands PlayerTeam.</summary>
+    public static class Team
+    {
+        public const int Max = 8;
+        public const byte None = 255;
+        public static readonly string[] Names = { "Blue", "Red", "Green", "Gold", "Violet", "Orange", "Cyan", "White" };
+        public static readonly UnityEngine.Color[] Colours =
+        {
+            new(0.25f, 0.55f, 1f), new(0.95f, 0.25f, 0.2f), new(0.3f, 0.85f, 0.35f), new(1f, 0.8f, 0.2f),
+            new(0.7f, 0.4f, 1f), new(1f, 0.5f, 0.1f), new(0.2f, 0.9f, 0.9f), new(0.92f, 0.92f, 0.95f),
+        };
+        public static UnityEngine.Color Colour(int t) => t >= 0 && t < Max ? Colours[t] : new UnityEngine.Color(0.5f, 0.5f, 0.5f);
+    }
 
     public static class Clip
     {
@@ -23,7 +35,7 @@ namespace LSBS
     public struct Tuning
     {
         /// <summary>Bumped when the settings change shape: a scene saved before then takes the new ones.</summary>
-        public const int Latest = 11;
+        public const int Latest = 15;
         /// <summary>A scene saved with older settings: keep what it has, and fill in what's new.</summary>
         public static void Upgrade(ref Tuning t)
         {
@@ -32,6 +44,23 @@ namespace LSBS
             int had = t.version;
             if (had < 6) { t = d; return; }
             t.version = Latest;
+            // launchers reload rather than run out; missiles home only on aircraft, and go astray a little at anything else
+            t.missiles = d.missiles; t.missileCooldown = d.missileCooldown; t.missileError = d.missileError;
+            if (had == 14) return;
+            // the practice game: one objective held ten minutes to win, gold to buy with, reinforcements every five minutes
+            t.holdToWin = d.holdToWin; t.startGold = d.startGold; t.waveGold = d.waveGold;
+            t.squadCost = d.squadCost; t.tankCost = d.tankCost; t.destroyerCost = d.destroyerCost;
+            t.waveInterval = d.waveInterval; t.captureRadius = d.captureRadius; t.captureSeconds = d.captureSeconds;
+            if (had == 13) return;
+            // one of each squad carries a launcher, with homing missiles for vehicles
+            t.missileRange = d.missileRange; t.missileSpeed = d.missileSpeed; t.missileTurn = d.missileTurn;
+            if (had == 12) return;
+            // the rifle goes automatic: 30% less a round, 30% as likely to hit (magazine and rate live in Gun);
+            // squads are eight riflemen and two sweepers, nobody else
+            t.damage *= 0.7f;
+            t.closeHit *= 0.3f; t.maxRangeHit *= 0.3f;
+            t.infantryWeight = d.infantryWeight; t.sweeperWeight = d.sweeperWeight; t.communicatorWeight = 0f; t.gunnerWeight = 0f;
+            if (had == 11) return;
             // blasts do half the harm they did, and a tank's shell wanders by angle rather than by a set distance
             t.grenadeFullDamage *= 0.5f; t.grenadeEdgeDamage *= 0.5f; t.shellFullDamage *= 0.5f; t.shellEdgeDamage *= 0.5f;
             t.tankScatter = d.tankScatter;
@@ -53,6 +82,11 @@ namespace LSBS
             t.pistolDamage = d.pistolDamage;
         }
         [HideInInspector] public int version;
+
+        [Header("The game")]
+        [Tooltip("Seconds a side must hold the objective, all told, to win.")] public float holdToWin;
+        [Tooltip("Gold each side starts with, and gets again each wave.")] public int startGold, waveGold;
+        [Tooltip("What each thing costs.")] public int squadCost, tankCost, destroyerCost;
 
         [Header("Forces")]
         [Tooltip("Soldiers each side starts with.")] public int startPerSide;
@@ -95,6 +129,14 @@ namespace LSBS
         public int grenades;
         public float grenadeFullRadius, grenadeFullDamage, grenadeEdgeRadius, grenadeEdgeDamage;
         public float grenadeMinThrow, grenadeMaxThrow, grenadeFuse;
+
+        [Header("Missile launcher")]
+        [Tooltip("Missiles each launcher man carries (they reload in between, so this is only a cap).")] public int missiles;
+        [Tooltip("Seconds between one missile and the next.")] public float missileCooldown;
+        [Tooltip("Degrees a missile fired at something on the ground may go astray (aircraft are tracked).")] public float missileError;
+        [Tooltip("How far off they'll fire at a vehicle.")] public float missileRange;
+        [Tooltip("Metres a second.")] public float missileSpeed;
+        [Tooltip("Degrees a second it can turn after its target.")] public float missileTurn;
 
         [Header("Artillery")]
         public float callRange;
@@ -141,20 +183,22 @@ namespace LSBS
         public static Tuning Default => new Tuning
         {
             version = Latest,
-            startPerSide = 500, capPerSide = 500, waveSize = 100, waveInterval = 30f, infantryWeight = 6f, sweeperWeight = 2f, communicatorWeight = 1f, gunnerWeight = 1f, pistolDamage = 80f, heightSpread = 0.08f,
-            maxRange = 52.5f, maxRangeHit = 0.03f, closeRange = 17.5f, closeHit = 0.27f, damage = 100f,
+            holdToWin = 600f, startGold = 1000, waveGold = 500, squadCost = 10, tankCost = 100, destroyerCost = 100,
+            startPerSide = 500, capPerSide = 500, waveSize = 100, waveInterval = 300f, infantryWeight = 8f, sweeperWeight = 2f, communicatorWeight = 0f, gunnerWeight = 0f, pistolDamage = 80f, heightSpread = 0.08f,
+            maxRange = 52.5f, maxRangeHit = 0.009f, closeRange = 17.5f, closeHit = 0.081f, damage = 70f,
             shotgunMaxRange = 40f, shotgunMaxRangeHit = 0.03f, shotgunCloseRange = 20f, shotgunCloseHit = 0.27f,
             pistolMaxRange = 28f, pistolMaxRangeHit = 0.03f, pistolCloseRange = 14f, pistolCloseHit = 0.27f, tankRange = 100f, tankScatter = 10f, maximHit = 0.5f, tankGunRange = 0.75f, pelletDamage = 20f, pellets = 9,
             headChance = 0.10f, limbChance = 0.20f, headMultiplier = 2f, limbMultiplier = 0.5f,
             battlefieldModifiers = true, coverHit = 0.35f, kneelHit = 0.8f, movingHit = 0.6f, aimMin = 0.8f, aimMax = 2.4f,
             grenades = 2, grenadeFullRadius = 8f, grenadeFullDamage = 50f, grenadeEdgeRadius = 15f, grenadeEdgeDamage = 15f,
             grenadeMinThrow = 17f, grenadeMaxThrow = 34f, grenadeFuse = 2.4f,
+            missiles = 999, missileCooldown = 30f, missileError = 2.5f, missileRange = 140f, missileSpeed = 55f, missileTurn = 120f,
             callRange = 200f, soldiersPerGun = 50, strikeSeconds = 20f, strikeRadius = 20f, strikeCooldown = 90f, gunRest = 240f,
             shellFullRadius = 8.5f, shellFullDamage = 60f, shellEdgeRadius = 20f, shellEdgeDamage = 15f, lowBlast = 0.5f,
             friendlyBlasts = true, dismember = 0.55f,
             runSpeed = 4.6f, cautiousSpeed = 3.2f,
             memory = 20f, attackEdge = 0.01f, defendEdge = 0.03f, maxDefend = 30f, pushShare = 0.75f, holdShare = 0.3f,
-            captureRadius = 18f, captureSeconds = 18f,
+            captureRadius = 24f, captureSeconds = 20f,
             maxRagdolls = 300, maxCorpses = 1500, ragdollDistance = 190f, soldiersPerTank = 100, maxTanks = 30, bunkerCap = 6, bunkerStay = 0.35f,
         };
     }
